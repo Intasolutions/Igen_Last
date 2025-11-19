@@ -7,6 +7,15 @@ import {
 import API from '../../api/axios';
 import FileUploader from '../../components/FileUploader';
 
+// Normalize various API shapes to an array (kept local; no separate listShape.js)
+const toArray = (d) => {
+  if (Array.isArray(d)) return d;
+  if (Array.isArray(d?.results)) return d.results;
+  if (Array.isArray(d?.items)) return d.items;
+  if (Array.isArray(d?.data)) return d.data;
+  return [];
+};
+
 const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
   const [formData, setFormData] = useState({
     vendor: '',
@@ -36,23 +45,60 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
   const userCompanyId = localStorage.getItem('company_id');
 
   useEffect(() => {
-    API.get('vendors/')
-      .then(res => setVendors(res.data))
-      .catch(err => console.error("Error fetching vendors:", err));
+    // --- Vendors: follow index object if returned ({"vendors": "https://.../vendors/vendors/"})
+    const loadVendors = async () => {
+      try {
+        const res = await API.get('vendors/');
+        if (!Array.isArray(res.data) && typeof res.data?.vendors === 'string') {
+          const res2 = await API.get(res.data.vendors);
+          setVendors(toArray(res2.data));
+        } else {
+          setVendors(toArray(res.data));
+        }
+      } catch (err) {
+        console.error('Error fetching vendors:', err);
+        setVendors([]);
+      }
+    };
 
-    API.get('cost-centres/')
-      .then(res => setCostCentres(res.data))
-      .catch(err => console.error("Error fetching cost centres:", err));
+    const loadCostCentres = async () => {
+      try {
+        const res = await API.get('cost-centres/');
+        setCostCentres(toArray(res.data));
+      } catch (err) {
+        console.error('Error fetching cost centres:', err);
+        setCostCentres([]);
+      }
+    };
 
-    API.get('entities/')
-      .then(res => setEntities(res.data))
-      .catch(err => console.error("Error fetching entities:", err));
+    const loadEntities = async () => {
+      try {
+        const res = await API.get('entities/');
+        setEntities(toArray(res.data));
+      } catch (err) {
+        console.error('Error fetching entities:', err);
+        setEntities([]);
+      }
+    };
 
-    if (userRole === 'SUPER_USER') {
-      API.get('companies/')
-        .then(res => setCompanies(res.data))
-        .catch(err => console.error("Error fetching companies:", err));
-    }
+    const loadCompanies = async () => {
+      if (userRole === 'SUPER_USER') {
+        try {
+          const res = await API.get('companies/');
+          setCompanies(toArray(res.data));
+        } catch (err) {
+          console.error('Error fetching companies:', err);
+          setCompanies([]);
+        }
+      } else {
+        setCompanies([]); // keep shape consistent
+      }
+    };
+
+    loadVendors();
+    loadCostCentres();
+    loadEntities();
+    loadCompanies();
   }, [userRole]);
 
   const handleChange = (e) => {
@@ -93,9 +139,11 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
   };
 
   const handleSubmit = () => {
-    const requiredFields = ['vendor', 'cost_centre', 'entity', 'contract_date', 'start_date', 'end_date'];
+    // ✅ Make description mandatory along with other required fields
+    const requiredFields = ['vendor', 'cost_centre', 'entity', 'description', 'contract_date', 'start_date', 'end_date'];
     for (let field of requiredFields) {
-      if (!formData[field]) {
+      const value = (formData[field] ?? '').toString().trim();
+      if (!value) {
         showSnackbar(`Please provide a valid ${field.replace('_', ' ')}.`, 'error');
         return;
       }
@@ -111,7 +159,7 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
     payload.append('vendor', formData.vendor);
     payload.append('cost_centre', formData.cost_centre);
     payload.append('entity', formData.entity);
-    payload.append('description', formData.description || '');
+    payload.append('description', formData.description.trim()); // ✅ send trimmed description
     payload.append('contract_date', formData.contract_date);
     payload.append('start_date', formData.start_date);
     payload.append('end_date', formData.end_date);
@@ -121,9 +169,9 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
       payload.append('document', file);
     });
 
-    API.post('contracts/', payload)
+    API.post('/contracts/', payload)
       .then(() => {
-        onContractAdded();
+        onContractAdded?.();
         resetForm();
         handleClose();
         showSnackbar('Contract saved successfully!', 'success');
@@ -132,6 +180,7 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
         console.error('Error:', err);
         const error = err.response?.data;
         if (error) {
+          // Show backend validation errors (e.g., "Description is required.")
           showSnackbar(`Error: ${JSON.stringify(error, null, 2)}`, 'error');
         } else {
           showSnackbar('Unexpected error occurred.', 'error');
@@ -161,33 +210,35 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
           </Typography>
 
           <Stack spacing={2}>
+            {/* Company selection for SUPER_USER only */}
             {userRole === 'SUPER_USER' && (
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <FormControl fullWidth required>
-                  <InputLabel>Company</InputLabel>
-                  <Select
-                    name="company"
-                    value={formData.company}
-                    onChange={(e) => handleDropdownChange('company', e.target.value)}
-                  >
-                    {companies.map((comp) => (
-                      <MenuItem key={comp.id} value={comp.id}>
-                        {comp.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                <TextField
-                  label="Description"
-                  name="description"
-                  value={formData.description}
-                  onChange={handleChange}
-                  fullWidth
-                  placeholder="Enter contract description (optional)"
-                />
-              </Stack>
+              <FormControl fullWidth required>
+                <InputLabel>Company</InputLabel>
+                <Select
+                  name="company"
+                  value={formData.company}
+                  onChange={(e) => handleDropdownChange('company', e.target.value)}
+                  label="Company"
+                >
+                  {Array.isArray(companies) && companies.map((comp) => (
+                    <MenuItem key={comp.id} value={comp.id}>
+                      {comp.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
             )}
+
+            {/* ✅ Description is always visible & required */}
+            <TextField
+              label="Description"
+              name="description"
+              value={formData.description}
+              onChange={handleChange}
+              fullWidth
+              required
+              placeholder="Enter contract description"
+            />
 
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
               <FormControl fullWidth required>
@@ -196,10 +247,11 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
                   name="vendor"
                   value={formData.vendor}
                   onChange={(e) => handleDropdownChange('vendor', e.target.value)}
+                  label="Vendor"
                 >
-                  {vendors.map((v) => (
+                  {Array.isArray(vendors) && vendors.map((v) => (
                     <MenuItem key={v.id} value={v.id}>
-                      {v.vendor_name}
+                      {v.vendor_name ?? v.name ?? `Vendor ${v.id}`}
                     </MenuItem>
                   ))}
                 </Select>
@@ -211,10 +263,11 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
                   name="cost_centre"
                   value={formData.cost_centre}
                   onChange={(e) => handleDropdownChange('cost_centre', e.target.value)}
+                  label="Cost Centre"
                 >
-                  {costCentres.map((cc) => (
-                    <MenuItem key={cc.cost_centre_id} value={cc.cost_centre_id}>
-                      {cc.name}
+                  {Array.isArray(costCentres) && costCentres.map((cc) => (
+                    <MenuItem key={cc.cost_centre_id ?? cc.id} value={cc.cost_centre_id ?? cc.id}>
+                      {cc.name ?? cc.code ?? `CC ${cc.id}`}
                     </MenuItem>
                   ))}
                 </Select>
@@ -227,8 +280,9 @@ const AddContractDialog = ({ open, handleClose, onContractAdded }) => {
                 name="entity"
                 value={formData.entity}
                 onChange={(e) => handleDropdownChange('entity', e.target.value)}
+                label="Entity"
               >
-                {entities.map((en) => (
+                {Array.isArray(entities) && entities.map((en) => (
                   <MenuItem key={en.id} value={en.id}>
                     {en.name}
                   </MenuItem>

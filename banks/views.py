@@ -1,67 +1,95 @@
-from rest_framework import viewsets, status
+from django.core.exceptions import PermissionDenied
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
+
 from .models import BankAccount
 from .serializers import BankAccountSerializer
+from users.permissions_matrix_guard import RoleActionPermission
+
+PermBanks = RoleActionPermission.for_module("banks")
+
+
+def is_super(user) -> bool:
+    return getattr(user, "is_superuser", False) or getattr(user, "role", None) == "SUPER_USER"
+
 
 class BankAccountViewSet(viewsets.ModelViewSet):
-    """
-    Handles CRUD for BankAccount, with soft delete
-    and optional inclusion of inactive records via query params.
-    """
     serializer_class = BankAccountSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, PermBanks]
+
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = {"company": ["exact"], "is_active": ["exact"]}
+    search_fields = ["account_name", "account_number", "bank_name", "ifsc"]
+    ordering_fields = ["created_at", "account_name"]
+    ordering = ["-created_at"]
 
     def get_queryset(self):
+        """
+        Non-super users see only banks for their assigned companies.
+        SUPER_USER can see everything.
+        `include_inactive` controls active/inactive filtering.
+        """
+        qs = BankAccount.objects.select_related("company")
+        include_inactive = (self.request.query_params.get("include_inactive") or "").lower()
+
         user = self.request.user
+        if not is_super(user):
+            rel = getattr(user, "companies", None)
+            if not rel or not rel.exists():
+                return BankAccount.objects.none()
+            qs = qs.filter(company__in=rel.all())
 
-        # ✅ Include inactive records if requested
-        include_inactive = self.request.query_params.get('include_inactive', 'false').lower() == 'true'
+        return qs if include_inactive in {"1", "true", "yes", "on"} else qs.filter(is_active=True)
 
-        if include_inactive or self.action in ['partial_update', 'destroy']:
-            base_queryset = BankAccount.objects.all()
+    def perform_create(self, serializer):
+        """
+        SUPER_USER: must specify company.
+        Non-super: can only create for one of their assigned companies.
+        If the user has exactly one company and none is provided, auto-assign it.
+        """
+        user = self.request.user
+        company = serializer.validated_data.get("company")
+
+        if is_super(user):
+            if not company:
+                raise PermissionDenied("SUPER_USER must specify company.")
+            serializer.save()
+            return
+
+        rel = getattr(user, "companies", None)
+        if not rel or not rel.exists():
+            raise PermissionDenied("User is not linked to any company.")
+
+        if company and not rel.filter(pk=company.pk).exists():
+            raise PermissionDenied("You cannot create accounts for this company.")
+
+        if company:
+            serializer.save()
+        elif rel.count() == 1:
+            serializer.save(company=rel.first())
         else:
-            base_queryset = BankAccount.objects.filter(is_active=True)
+            raise PermissionDenied("Please select a company.")
 
-        # ✅ Role-based filtering
-        if user.role == 'SUPER_USER':
-            return base_queryset
-
-        elif user.role == 'ACCOUNTANT':
-            return base_queryset.filter(company__in=user.companies.all())
-
-        return BankAccount.objects.none()
-
-    def get_object(self):
+    def perform_update(self, serializer):
         """
-        Override to allow retrieving inactive records for PATCH/DELETE.
+        SUPER_USER: unrestricted.
+        Non-super: can only update records where the company remains within their assigned companies.
+        Also prevents moving a record to a company the user doesn't belong to.
         """
-        queryset = BankAccount.objects.all()
-        obj = get_object_or_404(queryset, pk=self.kwargs["pk"])
-        self.check_object_permissions(self.request, obj)
-        return obj
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        Soft delete: mark the bank account as inactive.
-        """
+        user = self.request.user
         instance = self.get_object()
-        instance.is_active = False
-        instance.save()
-        return Response({'status': 'Bank account deactivated'}, status=status.HTTP_204_NO_CONTENT)
+        new_company = serializer.validated_data.get("company", instance.company)
 
-    def partial_update(self, request, *args, **kwargs):
-        """
-        Handle PATCH request to reactivate/deactivate.
-        """
-        instance = self.get_object()
-        is_active = request.data.get("is_active", None)
+        if is_super(user):
+            serializer.save()
+            return
 
-        if is_active is not None:
-            instance.is_active = is_active
-            instance.save()
-            status_text = "activated" if is_active else "deactivated"
-            return Response({"status": f"Bank account {status_text}"})
+        rel = getattr(user, "companies", None)
+        if not rel or not rel.exists():
+            raise PermissionDenied("User is not linked to any company.")
 
-        return super().partial_update(request, *args, **kwargs)
+        if not rel.filter(pk=new_company.pk).exists():
+            raise PermissionDenied("You cannot modify accounts for this company.")
+
+        serializer.save()

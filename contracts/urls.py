@@ -1,12 +1,29 @@
+from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ContractViewSet, ContractMilestoneViewSet
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+
+from .views import (
+    ContractViewSet,
+    ContractMilestoneListCreate,
+    ContractMilestoneDetail,
+)
+
+# Optional: back-compat stub so old builds that still call /contracts/contract-milestones/ don't crash
+class ContractMilestoneViewSet(viewsets.ViewSet):
+    def list(self, request):
+        return Response([], status=status.HTTP_200_OK)
 
 router = DefaultRouter()
+router.register(r'', ContractViewSet, basename='contracts')
+router.register(r'contract-milestones', ContractMilestoneViewSet, basename='contract-milestones')
 
-# Main contract management routes
-router.register(r'contracts', ContractViewSet, basename='contract')
+urlpatterns = [
+    path('', include(router.urls)),
 
-# Milestone routes (keep only if milestones are also managed via a separate API)
-router.register(r'contract-milestones', ContractMilestoneViewSet, basename='contract-milestone')
-
-urlpatterns = router.urls
+    # Nested milestones (what the new FE uses)
+    path('<int:contract_pk>/milestones/', ContractMilestoneListCreate.as_view(),
+         name='contract-milestone-list'),
+    path('<int:contract_pk>/milestones/<int:pk>/', ContractMilestoneDetail.as_view(),
+         name='contract-milestone-detail'),
+]

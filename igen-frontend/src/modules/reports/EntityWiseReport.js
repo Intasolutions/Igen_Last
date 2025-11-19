@@ -1,26 +1,38 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Card, CardContent, Typography, TextField, MenuItem,
-  Button, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, Paper, CircularProgress, Box, Alert, Stack,Select
-} from '@mui/material';
-import Autocomplete from '@mui/material/Autocomplete';
-import API from '../../api/axios';
 
-// ---------- helpers ----------
-const isDDMMYYYY = (s) => /^\d{2}-\d{2}-\d{4}$/.test(s);
-const isYYYYMMDD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-const toISODate = (d) => {
-  if (!d) return '';
-  const s = String(d);
-  if (isYYYYMMDD(s)) return s;
-  if (isDDMMYYYY(s)) {
-    const [dd, mm, yyyy] = s.split('-');
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  const dt = new Date(s);
-  if (Number.isNaN(dt.getTime())) return '';
-  return dt.toISOString().slice(0, 10);
+import React, { useEffect, useMemo, useState } from "react";
+import API from "../../api/axios";
+
+/* ------------------------------------------------------------------ */
+/* helpers (aligned with analytics.js style)                           */
+/* ------------------------------------------------------------------ */
+
+const fmtLocal = (d) => {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+const todayLocal = () => fmtLocal(new Date());
+const firstOfMonthLocal = () =>
+  fmtLocal(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+
+const toNumber = (x) => {
+  if (x === null || x === undefined || x === "") return 0;
+  const n = typeof x === "string" ? parseFloat(x.replace(/,/g, "")) : Number(x);
+  return Number.isFinite(n) ? n : 0;
+};
+const inr = (x) =>
+  toNumber(x).toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  });
+
+const formatDateDDMonYYYY = (iso) => {
+  if (!iso) return "-";
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return iso;
+  const day = String(dt.getDate()).padStart(2, "0");
+  const mon = dt.toLocaleString("en-GB", { month: "short" });
+  const yr = dt.getFullYear();
+  return `${day}-${mon}-${yr}`;
 };
 
 const getId = (obj) =>
@@ -31,101 +43,235 @@ const getName = (obj) =>
   obj?.entity_name ??
   obj?.cost_centre_name ??
   obj?.transaction_type_name ??
-  '';
+  "";
 
-const formatINR = (amount) => {
-  const n = typeof amount === 'number' ? amount : parseFloat(amount);
-  if (!Number.isFinite(n)) return '₹0.00';
-  return n.toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
+/* ------------------------------------------------------------------ */
+/* tiny UI kit (same vibe as analytics.js)                            */
+/* ------------------------------------------------------------------ */
+
+const Card = ({ title, subtitle, right, children }) => (
+  <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-200/70 overflow-hidden">
+    <div className="flex items-center justify-between border-b border-gray-100 px-4 sm:px-6 py-3">
+      <div>
+        {subtitle ? (
+          <div className="text-xs text-gray-500">{subtitle}</div>
+        ) : null}
+        <h3 className="text-base sm:text-lg font-semibold text-gray-900">
+          {title}
+        </h3>
+      </div>
+      {right}
+    </div>
+    <div className="p-4 sm:p-6">{children}</div>
+  </div>
+);
+
+const Toolbar = ({ children }) => (
+  <div className="flex flex-wrap items-end gap-3">{children}</div>
+);
+
+const Label = ({ children }) => (
+  <label className="block text-xs font-medium text-gray-600">
+    {children}
+  </label>
+);
+
+const Input = (props) => (
+  <input
+    {...props}
+    className={`h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 ${
+      props.className || ""
+    }`}
+  />
+);
+
+const Button = ({
+  variant = "solid",
+  children,
+  className = "",
+  disabled,
+  ...rest
+}) => {
+  const base =
+    "h-9 whitespace-nowrap rounded-lg px-3 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-0";
+  const variants = {
+    solid: "bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-300",
+    outline:
+      "border border-gray-300 text-gray-800 hover:bg-gray-50 focus:ring-gray-300",
+    subtle: "bg-gray-100 text-gray-800 hover:bg-gray-200 focus:ring-gray-300",
+  };
+  const disabledCls = disabled
+    ? "opacity-50 cursor-not-allowed pointer-events-none"
+    : "";
+  return (
+    <button
+      className={`${base} ${variants[variant]} ${disabledCls} ${className}`}
+      disabled={disabled}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
 };
 
-const useParamBuilder = (filters) =>
-  useMemo(
-    () =>
-      (overrides = {}) => {
-        const base = { ...filters, ...overrides };
-        const normalized = {
-          ...base,
-          start_date: toISODate(base.start_date),
-          end_date: toISODate(base.end_date),
-        };
-        return Object.fromEntries(
-          Object.entries(normalized).filter(
-            ([, v]) => v !== '' && v !== null && v !== undefined
-          )
-        );
-      },
-    [filters]
-  );
+const Table = ({ headers, children, foot }) => (
+  <div className="overflow-auto rounded-xl ring-1 ring-gray-200 bg-white">
+    <table className="min-w-full text-sm">
+      <thead className="bg-gray-50 text-gray-700">
+        <tr>
+          {headers.map((h, i) => (
+            <th
+              key={i}
+              className={`px-3 py-2 text-left font-semibold ${
+                i === headers.length - 1 ? "pr-4" : ""
+              }`}
+            >
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-100">{children}</tbody>
+      {foot}
+    </table>
+  </div>
+);
 
-// ---------- component ----------
+/* ------------------------------------------------------------------ */
+/* Classic Select (native <select> styled like your 3rd screenshot)    */
+/* ------------------------------------------------------------------ */
+
+const Select = ({
+  options = [], // [{id, name}]
+  value = "",
+  onChange,
+  placeholder = "All",
+  className = "",
+  style,
+}) => (
+  <div className={`relative ${className}`} style={style}>
+    <select
+      value={value ?? ""}
+      onChange={(e) => onChange?.(e.target.value)}
+      className="h-9 w-full rounded-lg border border-gray-300 bg-white pr-8 pl-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 appearance-none"
+    >
+      <option value="">{placeholder}</option>
+      {options.map((o) => (
+        <option key={o.id} value={o.id}>
+          {o.name}
+        </option>
+      ))}
+    </select>
+    {/* caret icon */}
+    <svg
+      className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500"
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path
+        fillRule="evenodd"
+        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.24 4.5a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z"
+        clipRule="evenodd"
+      />
+    </svg>
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
+/* Entity Wise Report (Tailwind-styled)                                */
+/* ------------------------------------------------------------------ */
+
 export default function EntityWiseReport() {
-  const todayISO = new Date().toISOString().slice(0, 10);
-  const firstDayISO = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-    .toISOString()
-    .slice(0, 10);
-
   const [filters, setFilters] = useState({
-    start_date: firstDayISO,
-    end_date: todayISO,
-    entity: '',
-    cost_centre: '',
-    transaction_type: '',
-    source: '',
-    min_amount: '',
-    max_amount: '',
+    start_date: firstOfMonthLocal(),
+    end_date: todayLocal(),
+    entity: "",
+    cost_centre: "",
+    transaction_type: "",
+    source: "",
+    min_amount: "",
+    max_amount: "",
   });
-
-  const buildParams = useParamBuilder(filters);
 
   const [entities, setEntities] = useState([]);
   const [costCentres, setCostCentres] = useState([]);
   const [transactionTypes, setTransactionTypes] = useState([]);
-  const [data, setData] = useState([]);
-  const [summary, setSummary] = useState({ total_credit: 0, total_debit: 0, net: 0 });
+
+  const [rows, setRows] = useState([]);
+  const [summary, setSummary] = useState({
+    total_credit: 0,
+    total_debit: 0,
+    net: 0,
+  });
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [err, setErr] = useState("");
 
-  // ---------- master data ----------
-  useEffect(() => {
-    (async () => {
-      try {
-        const [e, c, t] = await Promise.all([
-          API.get('entities/'),
-          API.get('cost-centres/'),
-          API.get('transaction-types/'),
-        ]);
-        setEntities(e.data?.results ?? e.data ?? []);
-        setCostCentres(c.data?.results ?? c.data ?? []);
-        setTransactionTypes(t.data?.results ?? t.data ?? []);
-      } catch (err) {
-        console.error('Failed to load master data', err);
-        setError('Failed to load master data.');
-      }
-    })();
-  }, []);
+  // options for selects
+  const entityOptions = useMemo(
+    () => entities.map((x) => ({ id: getId(x), name: getName(x) })),
+    [entities]
+  );
+  const costCentreOptions = useMemo(
+    () => costCentres.map((x) => ({ id: getId(x), name: getName(x) })),
+    [costCentres]
+  );
+  const txTypeOptions = useMemo(
+    () => transactionTypes.map((x) => ({ id: getId(x), name: getName(x) })),
+    [transactionTypes]
+  );
+  const sourceOptions = useMemo(
+    () => [
+      { id: "BANK", name: "Bank" },
+      { id: "CASH", name: "Cash" },
+    ],
+    []
+  );
 
-  // ---------- actions ----------
+  // param builder
+  const buildParams = useMemo(
+    () => (overrides = {}) => {
+      const base = { ...filters, ...overrides };
+      const toNumOrEmpty = (v) => {
+        if (v === "" || v === null || v === undefined) return "";
+        const n = Number(v);
+        return Number.isFinite(n) ? n : "";
+      };
+      const compact = Object.fromEntries(
+        Object.entries({
+          ...base,
+          min_amount: toNumOrEmpty(base.min_amount),
+          max_amount: toNumOrEmpty(base.max_amount),
+        }).filter(([, v]) => v !== "" && v !== null && v !== undefined)
+      );
+      return compact;
+    },
+    [filters]
+  );
+
   const validate = () => {
-    if (!filters.start_date || !filters.end_date) {
-      setError('Please select both Start Date and End Date.');
+    const { start_date, end_date, entity, min_amount, max_amount } = filters;
+    if (!start_date || !end_date) {
+      setErr("Please select both Start Date and End Date.");
       return false;
     }
-    const sd = toISODate(filters.start_date);
-    const ed = toISODate(filters.end_date);
-    if (!sd || !ed) {
-      setError('Invalid date(s). Use DD-MM-YYYY or YYYY-MM-DD.');
+    if (start_date > end_date) {
+      setErr("Start Date cannot be after End Date.");
       return false;
     }
-    if (sd > ed) {
-      setError('Start Date cannot be after End Date.');
+    if (!entity) {
+      setErr("Entity is required.");
       return false;
     }
-    if (!filters.entity) {
-      setError('Entity is required.');
-      return false;
+    if (min_amount !== "" && max_amount !== "") {
+      const min = Number(min_amount);
+      const max = Number(max_amount);
+      if (Number.isFinite(min) && Number.isFinite(max) && min > max) {
+        setErr("Min Amount cannot be greater than Max Amount.");
+        return false;
+      }
     }
-    setError('');
+    setErr("");
     return true;
   };
 
@@ -133,494 +279,350 @@ export default function EntityWiseReport() {
     if (!validate()) return;
     setLoading(true);
     try {
-      const list = await API.get('reports/entity-report/', {
-        params: { ...buildParams(), page_size: 1000 },
-      });
-      setData(list.data?.results ?? list.data ?? []);
+      const params = { ...buildParams(), page_size: 1000 };
+      const list = await API.get("reports/entity-report/", { params });
+      setRows(list.data?.results ?? list.data ?? []);
 
-      const sum = await API.get('reports/entity-report/summary/', {
+      const sum = await API.get("reports/entity-report/summary/", {
         params: buildParams(),
       });
       setSummary(sum.data ?? { total_credit: 0, total_debit: 0, net: 0 });
-    } catch (err) {
-      console.error('Error fetching report:', err);
-      const detail = err?.response?.data?.detail;
-      setError(detail || 'Failed to fetch report.');
-      setData([]);
+    } catch (e) {
+      console.error(e);
+      const detail = e?.response?.data?.detail;
+      setErr(detail || "Failed to fetch report.");
+      setRows([]);
       setSummary({ total_credit: 0, total_debit: 0, net: 0 });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleExport = async () => {
+  const exportXlsx = async () => {
     if (!validate()) return;
     try {
-      const response = await API.get('reports/entity-report/export/', {
+      const res = await API.get("reports/entity-report/export/", {
         params: buildParams(),
-        responseType: 'blob',
+        responseType: "blob",
       });
-      if (response.status === 204) {
-        alert('No data to export.');
+      if (res.status === 204) {
+        alert("No data to export.");
         return;
       }
-      const cd = response.headers?.['content-disposition'] || '';
+      const cd = res.headers?.["content-disposition"] || "";
       const match = /filename\*?=(?:UTF-8''|")?([^"]+)/i.exec(cd);
-      const filename = match ? decodeURIComponent(match[1]) : 'entity_wise_report.xlsx';
-
-      const url = URL.createObjectURL(new Blob([response.data]));
-      const a = document.createElement('a');
+      const filename = match
+        ? decodeURIComponent(match[1])
+        : "entity_wise_report.xlsx";
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement("a");
       a.href = url;
-      a.download = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
-      document.body.appendChild(a);
+      a.download = filename.endsWith(".xlsx") ? filename : `${filename}.xlsx`;
       a.click();
-      a.remove();
       URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('Export failed', err);
-      alert('Export failed');
+    } catch (e) {
+      console.error(e);
+      alert("Export failed");
     }
   };
 
-  const bindAuto = (list, valueId, onChange) => {
-    const selected =
-      list.find((item) => String(getId(item)) === String(valueId)) ?? null;
-    return {
-      options: list,
-      value: selected,
-      getOptionLabel: (option) => getName(option) || '',
-      isOptionEqualToValue: (opt, val) => String(getId(opt)) === String(getId(val)),
-      onChange: (_e, val) => onChange(val ? getId(val) : ''),
-      renderInput: (params) => <TextField {...params} fullWidth />,
-    };
-  };
-
-  // ---------- render ----------
-  return (
-    <div className="p-6 bg-gray-50 min-h-screen">
-      {/* Filter Section */}
-<Paper
-  elevation={0}
-  sx={{
-    p: 3,
-    mb: 3,
-    borderRadius: 4,
-    border: '1px solid rgba(0,0,0,0.03)',
-    bgcolor: '#ffffff',
-    boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
-    transition: 'all 0.3s ease',
-    '&:hover': { boxShadow: '0 6px 20px rgba(0,0,0,0.1)' }
-  }}
->
-  <Stack
-    direction={{ xs: 'column', md: 'row' }}
-    spacing={2}
-    alignItems="center"
-    useFlexGap
-    flexWrap="wrap"
-    sx={{
-      '& > *': {
-        transition: 'all 0.2s ease',
-        '&:focus-within': {
-          transform: 'translateY(-2px)',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }
+  // masters
+  useEffect(() => {
+    (async () => {
+      try {
+        const [e, c, t] = await Promise.all([
+          API.get("entities/"),
+          API.get("cost-centres/"),
+          API.get("transaction-types/"),
+        ]);
+        setEntities(e.data?.results ?? e.data ?? []);
+        setCostCentres(c.data?.results ?? c.data ?? []);
+        setTransactionTypes(t.data?.results ?? t.data ?? []);
+      } catch (e) {
+        console.error(e);
+        setErr("Failed to load master data.");
       }
-    }}
-  >
-    {/* <Typography variant="h6" className="font-semibold text-gray-800 mb-2 md:mb-0">
-      Entity-Wise Ledger Report
-    </Typography> */}
-    <TextField
-      type="date"
-      size="small"
-      label="Start Date"
-      InputLabelProps={{ shrink: true, sx: { color: 'grey.600', fontWeight: 500 } }}
-      value={toISODate(filters.start_date)}
-      onChange={(e) => setFilters((f) => ({ ...f, start_date: e.target.value }))}
-      sx={{
-        width: 160,
-        '& .MuiInputBase-root': {
-          borderRadius: 4,
-          bgcolor: '#f5f5f5',
-          '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '&:hover': { bgcolor: '#eceff1' },
-          '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-          fontSize: '0.9rem',
-          height: 44,
-          '& input': { py: 1.4 }
-        }
-      }}
-    />
-    <TextField
-      type="date"
-      size="small"
-      label="End Date"
-      InputLabelProps={{ shrink: true, sx: { color: 'grey.600', fontWeight: 500 } }}
-      value={toISODate(filters.end_date)}
-      onChange={(e) => setFilters((f) => ({ ...f, end_date: e.target.value }))}
-      sx={{
-        width: 160,
-        '& .MuiInputBase-root': {
-          borderRadius: 4,
-          bgcolor: '#f5f5f5',
-          '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '&:hover': { bgcolor: '#eceff1' },
-          '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-          fontSize: '0.9rem',
-          height: 44,
-          '& input': { py: 1.4 }
-        }
-      }}
-    />
-    <Autocomplete
-      {...bindAuto(entities, filters.entity, (val) =>
-        setFilters((f) => ({ ...f, entity: val }))
-      )}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label="Entity"
-          required
-          error={!filters.entity}
-         
-          size="small"
-          sx={{
-            width: 160,
-        '& .MuiInputBase-root': {
-          borderRadius: 4,
-          bgcolor: '#f5f5f5',
-          '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '&:hover': { bgcolor: '#eceff1' },
-          '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-          fontSize: '0.9rem',
-          height: 44,
-          '& input': { py: 1.4 }
-        }
-      }}
-        />
-      )}
-    />
-    <Autocomplete
-      {...bindAuto(costCentres, filters.cost_centre, (val) =>
-        setFilters((f) => ({ ...f, cost_centre: val }))
-      )}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label="Cost Centre"
-          size="small"
-          sx={{
-            width: 160,
-            '& .MuiInputBase-root': {
-              borderRadius: 4,
-              bgcolor: '#f5f5f5',
-              '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-              '&:hover': { bgcolor: '#eceff1' },
-              '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-              fontSize: '0.9rem',
-              height: 44,
-              '& input': { py: 1.4 }
-            },
-            '& .MuiInputLabel-root': { color: 'grey.600', fontWeight: 500 }
-          }}
-        />
-      )}
-    />
-    <Autocomplete
-      {...bindAuto(transactionTypes, filters.transaction_type, (val) =>
-        setFilters((f) => ({ ...f, transaction_type: val }))
-      )}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label="Transaction Type"
-          size="small"
-          sx={{
-            width: 160,
-            '& .MuiInputBase-root': {
-              borderRadius: 4,
-              bgcolor: '#f5f5f5',
-              '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-              '&:hover': { bgcolor: '#eceff1' },
-              '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-              fontSize: '0.9rem',
-              height: 44,
-              '& input': { py: 1.4 }
-            },
-            '& .MuiInputLabel-root': { color: 'grey.600', fontWeight: 500 }
-          }}
-        />
-      )}
-    />
-    <Select
-      size="small"
-      value={filters.source || ''}
-      onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
-      label="Source" // Added label
-      sx={{
-        minWidth: 140,
-        borderRadius: 4,
-        bgcolor: '#f5f5f5',
-        '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-        '&:hover': { bgcolor: '#eceff1' },
-        '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-        fontSize: '0.9rem',
-        height: 44,
-        '& .MuiSelect-select': { py: 1.4, pl: 2 },
-        '& .MuiSvgIcon-root': { color: 'grey.500' }
-      }}
-    >
-      <MenuItem value="" label="Cash/Bank">
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 7h18M3 12h18M3 17h18" strokeLinecap="round" />
-          </svg>
-          All
-        </Box>
-      </MenuItem>
-      <MenuItem value="BANK">
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2e7d32" strokeWidth="2">
-            <path d="M12 5v14M5 12h14" strokeLinecap="round" />
-          </svg>
-          Bank
-        </Box>
-      </MenuItem>
-      <MenuItem value="CASH">
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d32f2f" strokeWidth="2">
-            <path d="M5 12h14" strokeLinecap="round" />
-          </svg>
-          Cash
-        </Box>
-      </MenuItem>
-    </Select>
-    <TextField
-      size="small"
-      label="Min Amount"
-      value={filters.min_amount}
-      onChange={(e) => setFilters((f) => ({ ...f, min_amount: e.target.value }))}
-      InputLabelProps={{ sx: { color: 'grey.600', fontWeight: 500 } }}
-      sx={{
-        width: 140,
-        '& .MuiInputBase-root': {
-          borderRadius: 4,
-          bgcolor: '#f5f5f5',
-          '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '&:hover': { bgcolor: '#eceff1' },
-          '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-          fontSize: '0.9rem',
-          height: 44,
-          '& input': { py: 1.4 }
-        }
-      }}
-    />
-    <TextField
-      size="small"
-      label="Max Amount"
-      value={filters.max_amount}
-      onChange={(e) => setFilters((f) => ({ ...f, max_amount: e.target.value }))}
-      InputLabelProps={{ sx: { color: 'grey.600', fontWeight: 500 } }}
-      sx={{
-        width: 140,
-        '& .MuiInputBase-root': {
-          borderRadius: 4,
-          bgcolor: '#f5f5f5',
-          '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '&:hover': { bgcolor: '#eceff1' },
-          '&.Mui-focused': { bgcolor: '#ffffff', boxShadow: '0 0 0 3px rgba(25, 118, 210, 0.1)' },
-          fontSize: '0.9rem',
-          height: 44,
-          '& input': { py: 1.4 }
-        }
-      }}
-    />
-    <Button
-      variant="contained"
-      onClick={fetchReport}
-      disabled={!filters.entity}
-      sx={{
-        borderRadius: 4,
-        bgcolor: '#1976d2',
-        '&:hover': { bgcolor: '#1565c0' },
-        '&:disabled': { bgcolor: 'grey.400', color: 'grey.800' },
-        height: 44,
-        px: 3,
-        fontWeight: 500,
-        fontSize: '0.9rem',
-        textTransform: 'none'
-      }}
-    >
-      Apply
-    </Button>
-    {/* <Button
-      variant="outlined"
-      onClick={handleExport}
-      disabled={!filters.entity}
-      sx={{
-        borderRadius: 4,
-        borderColor: 'grey.300',
-        color: '#1976d2',
-        bgcolor: '#f5f5f5',
-        '&:hover': { bgcolor: '#e3f2fd', borderColor: '#1976d2' },
-        '&:disabled': { bgcolor: 'grey.200', color: 'grey.500' },
-        height: 44,
-        px: 3,
-        fontWeight: 500,
-        fontSize: '0.9rem',
-        textTransform: 'none'
-      }}
-    >
-      Export
-    </Button> */}
-    <Button
-      variant="outlined"
-      onClick={() => setFilters({
-        start_date: firstDayISO,
-        end_date: todayISO,
-        entity: '',
-        cost_centre: '',
-        transaction_type: '',
-        source: '',
-        min_amount: '',
-        max_amount: '',
-      })}
-      disabled={loading}
-      sx={{
-        borderRadius: 4,
-        borderColor: 'grey.300',
-        color: '#424242',
-        bgcolor: '#f5f5f5',
-        '&:hover': { bgcolor: '#eceff1', borderColor: '#424242' },
-        '&:disabled': { bgcolor: 'grey.200', color: 'grey.500' },
-        height: 44,
-        px: 3,
-        fontWeight: 500,
-        fontSize: '0.9rem',
-        textTransform: 'none'
-      }}
-    >
-      Reset Filters
-    </Button>
-  </Stack>
-  {error && (
-    <Stack className="mt-4">
-      <Alert severity="error" onClose={() => setError('')} className="rounded-lg shadow-sm bg-red-50">
-        {error}
-      </Alert>
-    </Stack>
-  )}
-</Paper>
-<style jsx>{`
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .animate-fade-in {
-    animation: fadeIn 0.5s ease-in;
-  }
-`}</style>
+    })();
+  }, []);
 
-      {/* Total Credit/Debit/Net Summary */}
-      <Card className="mb-6 shadow-lg rounded-xl animate-fade-in">
-        <CardContent className="bg-gradient-to-r from-blue-600 to-blue-800 text-white p-6">
-          <div className="flex flex-col sm:flex-row justify-between items-center">
-            <Typography variant="subtitle1" className="font-semibold mb-2 sm:mb-0">
-              Total Credit: <span className="font-bold">{formatINR(summary.total_credit)}</span>
-            </Typography>
-            <Typography variant="subtitle1" className="font-semibold mb-2 sm:mb-0">
-              Total Debit: <span className="font-bold">{formatINR(summary.total_debit)}</span>
-            </Typography>
-            <Typography variant="subtitle1" className="font-semibold">
-              Net: <span className="font-bold">{formatINR(summary.net)}</span>
-            </Typography>
+  const reset = () =>
+    setFilters({
+      start_date: firstOfMonthLocal(),
+      end_date: todayLocal(),
+      entity: "",
+      cost_centre: "",
+      transaction_type: "",
+      source: "",
+      min_amount: "",
+      max_amount: "",
+    });
+
+  /* ----------------------------- UI ----------------------------- */
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-xs text-gray-500">Reports</div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            Entity-wise Report
+          </h1>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <Card
+        title="Filters"
+        subtitle="Choose date range, entity, and optional constraints"
+        right={
+          <div className="hidden sm:flex gap-2">
+            <Button variant="outline" onClick={reset}>
+              Reset
+            </Button>
+            <Button variant="outline" onClick={exportXlsx} disabled={!filters.entity}>
+              Export
+            </Button>
+            <Button onClick={fetchReport} disabled={!filters.entity}>
+              Search
+            </Button>
           </div>
-        </CardContent>
+        }
+      >
+        <Toolbar>
+          <div>
+            <Label>Start Date</Label>
+            <Input
+              type="date"
+              value={filters.start_date}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, start_date: e.target.value }))
+              }
+              style={{ width: 160 }}
+            />
+          </div>
+          <div>
+            <Label>End Date</Label>
+            <Input
+              type="date"
+              value={filters.end_date}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, end_date: e.target.value }))
+              }
+              style={{ width: 160 }}
+            />
+          </div>
+
+          <div style={{ width: 220 }}>
+            <Label>Entity</Label>
+            <Select
+              options={entityOptions}
+              value={filters.entity}
+              onChange={(id) => setFilters((f) => ({ ...f, entity: id }))}
+              placeholder="Select entity…"
+            />
+          </div>
+
+          <div style={{ width: 220 }}>
+            <Label>Cost Centre</Label>
+            <Select
+              options={costCentreOptions}
+              value={filters.cost_centre}
+              onChange={(id) => setFilters((f) => ({ ...f, cost_centre: id }))}
+              placeholder="All cost centres"
+            />
+          </div>
+
+          <div style={{ width: 220 }}>
+            <Label>Transaction Type</Label>
+            <Select
+              options={txTypeOptions}
+              value={filters.transaction_type}
+              onChange={(id) =>
+                setFilters((f) => ({ ...f, transaction_type: id }))
+              }
+              placeholder="All transaction types"
+            />
+          </div>
+
+          <div style={{ width: 180 }}>
+            <Label>Source</Label>
+            <Select
+              options={sourceOptions}
+              value={filters.source}
+              onChange={(id) => setFilters((f) => ({ ...f, source: id }))}
+              placeholder="All sources"
+            />
+          </div>
+
+          <div>
+            <Label>Min Amount</Label>
+            <Input
+              placeholder="e.g. 1000"
+              value={filters.min_amount}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, min_amount: e.target.value }))
+              }
+              style={{ width: 140 }}
+              inputMode="decimal"
+            />
+          </div>
+          <div>
+            <Label>Max Amount</Label>
+            <Input
+              placeholder="e.g. 50000"
+              value={filters.max_amount}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, max_amount: e.target.value }))
+              }
+              style={{ width: 140 }}
+              inputMode="decimal"
+            />
+          </div>
+
+          {/* mobile actions */}
+          <div className="flex gap-2 sm:hidden w-full">
+            <Button variant="outline" onClick={reset} className="flex-1">
+              Reset
+            </Button>
+            <Button
+              variant="outline"
+              onClick={exportXlsx}
+              disabled={!filters.entity}
+              className="flex-1"
+            >
+              Export
+            </Button>
+            <Button
+              onClick={fetchReport}
+              disabled={!filters.entity}
+              className="flex-1"
+            >
+              Apply
+            </Button>
+          </div>
+        </Toolbar>
+
+        {err && (
+          <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800 text-sm">
+            {err}
+          </div>
+        )}
       </Card>
 
-      {/* Table Section */}
-      {loading ? (
-        <Box className="flex justify-center py-8">
-          <CircularProgress className="text-blue-600" />
-        </Box>
-      ) : (
-        <Card className="shadow-lg rounded-xl animate-fade-in">
-          <CardContent>
-            {data.length === 0 ? (
-              <Typography className="text-center py-4 text-gray-500 font-medium">
-                No records found for selected filters.
-              </Typography>
-            ) : (
-              <TableContainer component={Paper} className="shadow-md rounded-lg">
-                <Table size="small" stickyHeader>
-                  <TableHead>
-                    <TableRow className="bg-blue-50">
-                      <TableCell className="font-bold text-gray-800">Date</TableCell>
-                      <TableCell className="font-bold text-gray-800">Source</TableCell>
-                      <TableCell className="font-bold text-gray-800" align="right">Amount (Cr)</TableCell>
-                      <TableCell className="font-bold text-gray-800" align="right">Amount (Dr)</TableCell>
-                      <TableCell className="font-bold text-gray-800">Cost Centre</TableCell>
-                      <TableCell className="font-bold text-gray-800">Entity</TableCell>
-                      <TableCell className="font-bold text-gray-800">Transaction Type</TableCell>
-                      <TableCell className="font-bold text-gray-800">Asset</TableCell>
-                      <TableCell className="font-bold text-gray-800">Contract</TableCell>
-                      <TableCell className="font-bold text-gray-800">Remarks</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {data.map((row, idx) => {
-                      const amt = typeof row.amount === 'number' ? row.amount : parseFloat(row.amount);
-                      const credit = amt > 0 ? amt : null;
-                      const debit = amt < 0 ? Math.abs(amt) : null;
-                      return (
-                        <TableRow
-                          key={idx}
-                          className={`hover:bg-blue-50 transition-colors ${idx % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}
-                        >
-                          <TableCell>{row.date}</TableCell>
-                          <TableCell>{row.source || '-'}</TableCell>
-                          <TableCell align="right">{credit ? formatINR(credit) : '-'}</TableCell>
-                          <TableCell align="right">{debit ? formatINR(debit) : '-'}</TableCell>
-                          <TableCell>{row.cost_centre_name || row.cost_centre?.name || '-'}</TableCell>
-                          <TableCell>{row.entity_name || row.entity?.name || '-'}</TableCell>
-                          <TableCell>{row.transaction_type_name || row.transaction_type?.name || '-'}</TableCell>
-                          <TableCell>{row.asset_name || row.asset?.name || '-'}</TableCell>
-                          <TableCell>{row.contract_name || row.contract?.name || '-'}</TableCell>
-                          <TableCell>{row.remarks || '-'}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                    <TableRow className="bg-blue-100 font-bold">
-                      <TableCell colSpan={2} className="text-gray-800">
-                        Total
-                      </TableCell>
-                      <TableCell align="right" className="text-gray-800">
-                        {formatINR(summary.total_credit)}
-                      </TableCell>
-                      <TableCell align="right" className="text-gray-800">
-                        {formatINR(summary.total_debit)}
-                      </TableCell>
-                      <TableCell colSpan={6} className="text-gray-800">
-                        Net: {formatINR(summary.net)}
-                      </TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            )}
-          </CardContent>
-        </Card>
-      )}
-      <style jsx>{`
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-fade-in {
-          animation: fadeIn 0.5s ease-in;
-        }
-      `}</style>
+      {/* Summary strip */}
+      <Card title="Summary" subtitle="Totals for the selected filters">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="rounded-xl border border-gray-200 p-4 bg-blue-50">
+            <div className="text-xs text-blue-700">Total Credit</div>
+            <div className="text-xl font-semibold text-gray-900">
+              ₹ {inr(summary.total_credit)}
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-200 p-4 bg-blue-50">
+            <div className="text-xs text-blue-700">Total Debit</div>
+            <div className="text-xl font-semibold text-gray-900">
+              ₹ {inr(summary.total_debit)}
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-200 p-4 bg-blue-50">
+            <div className="text-xs text-blue-700">Net</div>
+            <div className="text-xl font-semibold text-gray-900">
+              ₹ {inr(summary.net)}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Table */}
+      <Card
+        title="Transactions"
+        subtitle={`Showing ${rows.length} ${
+          rows.length === 1 ? "record" : "records"
+        }`}
+      >
+        <Table
+          headers={[
+            "Date",
+            "Source",
+            "Amount (Cr)",
+            "Amount (Dr)",
+            "Cost Centre",
+            "Entity",
+            "Transaction Type",
+            "Asset",
+            "Contract",
+            "Remarks",
+          ]}
+        >
+          {loading && (
+            <tr>
+              <td className="px-3 py-8 text-gray-500" colSpan={10}>
+                Loading…
+              </td>
+            </tr>
+          )}
+          {!loading && rows.length === 0 && (
+            <tr>
+              <td className="px-3 py-10 text-gray-500" colSpan={10}>
+                No transactions found. Try changing the <b>Entity</b>, widening
+                the <b>Date Range</b>, or clearing optional filters.
+              </td>
+            </tr>
+          )}
+          {!loading &&
+            rows.map((r, i) => {
+              const amt =
+                typeof r.amount === "number" ? r.amount : parseFloat(r.amount);
+              const credit = amt > 0 ? amt : null;
+              const debit = amt < 0 ? Math.abs(amt) : null;
+              return (
+                <tr key={i} className="hover:bg-gray-50">
+                  <td className="px-3 py-2">{formatDateDDMonYYYY(r.date)}</td>
+                  <td className="px-3 py-2">{r.source || "-"}</td>
+                  <td className="px-3 py-2 text-right">
+                    {credit ? `₹ ${inr(credit)}` : "-"}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {debit ? `₹ ${inr(debit)}` : "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.cost_centre_name || r.cost_centre?.name || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.entity_name || r.entity?.name || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.transaction_type_name || r.transaction_type?.name || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.asset_name || r.asset?.name || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.contract_name || r.contract?.name || "-"}
+                  </td>
+                  <td className="px-3 py-2">{r.remarks || "-"}</td>
+                </tr>
+              );
+            })}
+          {rows.length > 0 && (
+            <tr className="bg-blue-50 font-semibold">
+              <td className="px-3 py-2" colSpan={2}>
+                Total
+              </td>
+              <td className="px-3 py-2 text-right">
+                ₹ {inr(summary.total_credit)}
+              </td>
+              <td className="px-3 py-2 text-right">
+                ₹ {inr(summary.total_debit)}
+              </td>
+              <td className="px-3 py-2" colSpan={6}>
+                Net: ₹ {inr(summary.net)}
+              </td>
+            </tr>
+          )}
+        </Table>
+      </Card>
     </div>
   );
 }

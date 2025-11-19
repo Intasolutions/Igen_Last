@@ -1,0 +1,1755 @@
+// src/modules/Properties/PropertyManagement.js
+import React, { useEffect, useMemo, useState } from 'react';
+import API from '../../api/axios';
+import {
+  Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
+  DialogContent, DialogTitle, MenuItem, Snackbar, Alert,
+  TextField, Typography, IconButton, Tooltip, Table, TableBody,
+  TableCell, TableContainer, TableHead, TableRow, Stepper, Step, StepLabel,
+  Collapse, Grid, Link, TablePagination, Slide, Radio, RadioGroup,
+  FormControlLabel, FormControl, FormLabel, CircularProgress, Checkbox,
+  Autocomplete
+} from '@mui/material';
+import { Edit, KeyboardArrowDown, KeyboardArrowUp, Delete, Add } from '@mui/icons-material';
+import { useDropzone } from 'react-dropzone';
+import UploadFileIcon from '@mui/icons-material/UploadFile';
+
+const Transition = React.forwardRef(function Transition(props, ref) {
+  return <Slide direction="up" ref={ref} {...props} />;
+});
+
+/* --- roles --- */
+const isCenterHeadRole = (role) => {
+  if (!role) return false;
+  const r = String(role).toLowerCase().trim();
+  return ['center head', 'center_head', 'centerhead', 'centre head', 'centre_head'].includes(r);
+};
+const userCanEditProperties = () => {
+  try {
+    const raw =
+      localStorage.getItem('user') ||
+      localStorage.getItem('auth_user') ||
+      localStorage.getItem('profile') ||
+      localStorage.getItem('auth');
+
+    if (!raw) return true;
+    const u = JSON.parse(raw);
+    const role = u?.role ?? u?.user_role ?? u?.user?.role ?? u?.profile?.role ?? u?.data?.role;
+
+    const isCH = isCenterHeadRole(role);
+    const perms =
+      (Array.isArray(u?.permissions) && u.permissions) ||
+      (Array.isArray(u?.perms) && u.perms) ||
+      (Array.isArray(u?.scopes) && u.scopes) ||
+      [];
+    const hasExplicitEdit = perms.some(p =>
+      ['properties.edit', 'properties.create', 'properties:update', 'properties:write']
+        .includes(String(p).toLowerCase())
+    );
+    if (isCH && !hasExplicitEdit) return false;
+    return true;
+  } catch {
+    return true;
+  }
+};
+
+/* --- helpers --- */
+const joinUrl = (base, path) => {
+  if (!path) return '';
+  if (path.startsWith('http')) return path;
+  const b = String(base || '').replace(/\/+$/, '');
+  const p = String(path || '').replace(/^\/+/, '');
+  return `${b}/${p}`;
+};
+
+const getFileUrl = (apiBase, maybeRelative) => {
+  if (!maybeRelative) return '';
+  if (maybeRelative.startsWith('http')) return maybeRelative;
+  try {
+    const u = new URL(apiBase || API.defaults.baseURL || '');
+    const origin = u.origin;
+    return joinUrl(origin.replace(/\/+$/, ''), maybeRelative);
+  } catch {
+    const origin = String(apiBase || API.defaults.baseURL || '').replace(/\/api\/?$/, '');
+    return joinUrl(origin, maybeRelative);
+  }
+};
+
+// Convert many date shapes into YYYY-MM-DD for <input type="date">
+const toISODate = (d) => {
+  if (!d) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const dt = new Date(d);
+  if (!isNaN(dt.getTime())) {
+    return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 10);
+  }
+  const m = String(d).trim().match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (m) {
+    const [, dd, mm, yyyy] = m;
+    return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  }
+  return '';
+};
+
+// Add N months and return YYYY-MM-DD (clamps to end of month if needed)
+const addMonthsISO = (isoDate, months = 0) => {
+  if (!isoDate) return '';
+  const [y, m, d] = isoDate.split('-').map(Number);
+  if (!y || !m || !d) return '';
+  const base = new Date(Date.UTC(y, m - 1, 1));
+  base.setUTCMonth(base.getUTCMonth() + months);
+  // clamp day to end of target month
+  const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0)).getUTCDate();
+  const day = Math.min(d, lastDay);
+  const out = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), day));
+  return out.toISOString().slice(0, 10);
+};
+
+const useEndpoints = () =>
+  useMemo(
+    () => ({
+      properties: 'properties/properties/',
+      propertyDocuments: 'properties/property-documents/',
+      propertyKeyDates: 'properties/property-key-dates/',
+      companies: 'companies/',
+      contactsList: 'contacts/contacts/',
+      contactsIndex: 'contacts/',
+    }),
+    []
+  );
+
+/** Prevent wheel & arrow key changes on numeric-ish inputs. */
+const numberNoScroll = {
+  inputProps: {
+    inputMode: 'numeric',
+    pattern: '[0-9]*',
+    onWheel: (e) => e.currentTarget.blur(),
+    onKeyDown: (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.preventDefault();
+    },
+  },
+};
+
+/* --- File Uploader --- */
+const FileUploader = ({ onFilesChange, uploading, selectedFiles, setSelectedFiles }) => {
+  const onDrop = (acceptedFiles) => {
+    if ((selectedFiles?.length || 0) + acceptedFiles.length > 20) {
+      alert('You can upload a maximum of 20 files at a time');
+      acceptedFiles = acceptedFiles.slice(0, Math.max(0, 20 - (selectedFiles?.length || 0)));
+    }
+
+    const valid = acceptedFiles.filter(file => {
+      if (file.size > 5 * 1024 * 1024) {
+        alert(`${file.name} exceeds 5MB limit`);
+        return false;
+      }
+      return true;
+    });
+    if (valid.length === 0) return;
+
+    const updatedFiles = [
+      ...selectedFiles,
+      ...valid.map(file => ({ file, name: file.name }))
+    ];
+    setSelectedFiles(updatedFiles);
+    onFilesChange(updatedFiles);
+  };
+
+  const handleNameChange = (index, newName) => {
+    const updatedFiles = [...selectedFiles];
+    updatedFiles[index] = { ...updatedFiles[index], name: newName };
+    setSelectedFiles(updatedFiles);
+    onFilesChange(updatedFiles);
+  };
+
+  const { getRootProps, getInputProps } = useDropzone({ onDrop });
+
+  return (
+    <Box sx={{ mt: 2 }}>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>Upload New Documents (Max 20)</Typography>
+      <Box
+        {...getRootProps()}
+        sx={{
+          border: '2px dashed #90caf9',
+          p: 2,
+          borderRadius: 2,
+          textAlign: 'center',
+          backgroundColor: '#f5f5f5',
+          cursor: 'pointer'
+        }}
+      >
+        <input {...getInputProps()} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.csv" />
+        <UploadFileIcon sx={{ fontSize: 40, color: '#90caf9' }} />
+        <Typography variant="body2" sx={{ mt: 1 }}>Drag & Drop or Click to Upload</Typography>
+      </Box>
+
+      {selectedFiles?.length > 0 && (
+        <Box sx={{ mt: 2 }}>
+          {selectedFiles.map((fileObj, index) => (
+            <Box key={index} sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
+              <TextField
+                label={`Document ${index + 1} Name`}
+                value={fileObj.name}
+                onChange={(e) => handleNameChange(index, e.target.value)}
+                size="small"
+                sx={{ flex: 1 }}
+                placeholder="Enter custom document name"
+              />
+              <Chip label={fileObj.file?.name || fileObj.name} size="small" />
+            </Box>
+          ))}
+        </Box>
+      )}
+
+      {uploading && (
+        <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
+          <CircularProgress size={20} />
+          <Typography sx={{ ml: 1 }}>Uploading...</Typography>
+        </Box>
+      )}
+    </Box>
+  );
+};
+
+/* --- Page --- */
+export default function PropertiesPage() {
+  const EP = useEndpoints();
+
+  const [canEdit, setCanEdit] = useState(true);
+  useEffect(() => {
+    setCanEdit(userCanEditProperties());
+  }, []);
+
+  // GLOBAL GUARD: stop mouse wheel & arrow up/down changing values
+  useEffect(() => {
+    const wheelGuard = () => {
+      const el = document.activeElement;
+      if (!el) return;
+      if (
+        el.tagName === 'INPUT' &&
+        (
+          el.type === 'number' ||
+          el.getAttribute('inputmode') === 'numeric' ||
+          el.getAttribute('inputmode') === 'decimal'
+        )
+      ) {
+        el.blur(); // prevents wheel increments
+      }
+    };
+    const arrowGuard = (e) => {
+      const el = document.activeElement;
+      if (!el) return;
+      if (
+        el.tagName === 'INPUT' &&
+        (
+          el.type === 'number' ||
+          el.getAttribute('inputmode') === 'numeric' ||
+          el.getAttribute('inputmode') === 'decimal'
+        ) &&
+        (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+      ) {
+        e.preventDefault(); // blocks arrow increments
+      }
+    };
+    window.addEventListener('wheel', wheelGuard, { passive: true });
+    window.addEventListener('keydown', arrowGuard);
+    return () => {
+      window.removeEventListener('wheel', wheelGuard);
+      window.removeEventListener('keydown', arrowGuard);
+    };
+  }, []);
+
+  const [properties, setProperties] = useState([]);
+  const [companies, setCompanies] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [landlords, setLandlords] = useState([]);
+  const [tenants, setTenants] = useState([]);
+  const [projectManagers, setProjectManagers] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [documents, setDocuments] = useState([]);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, id: null, isActive: false });
+  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+  const [activeStep, setActiveStep] = useState(0);
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(5);
+  const [searchText, setSearchText] = useState('');
+  const [uploading, setUploading] = useState(false);
+
+  const [landlordQuery, setLandlordQuery] = useState('');
+  const [tenantQuery, setTenantQuery] = useState('');
+  const [projectManagerQuery, setProjectManagerQuery] = useState('');
+
+  const [landlordOptions, setLandlordOptions] = useState([]);
+  const [tenantOptions, setTenantOptions] = useState([]);
+  const [projectManagerOptions, setProjectManagerOptions] = useState([]);
+
+  const [loadingLandlords, setLoadingLandlords] = useState(false);
+  const [loadingTenants, setLoadingTenants] = useState(false);
+  const [loadingPMs, setLoadingPMs] = useState(false);
+
+  // Track whether the lease end date has been edited manually
+  const [leaseEndManuallyEdited, setLeaseEndManuallyEdited] = useState(false);
+
+  const steps = ['Property Details', 'Configuration & Financials', 'Address', 'Attachments & Key Dates'];
+
+  const emptyForm = {
+    company: '',
+    name: '',
+    location: '',
+    purpose: 'rental',
+    status: 'vacant',
+    landlord: '',
+    project_manager: '',
+    tenant: '',
+    remarks: '',
+    config_bhk: '',
+    config_bathroom: '',
+    property_type: '',
+    build_up_area_sqft: '',
+    land_area_cents: '',
+    monthly_rent: '',
+    expected_sale_price: '',
+    expected_price: '',
+    lease_start_date: '',
+    lease_end_date: '',
+    next_inspection_date: '',
+    igen_service_charge: '',
+    balconies: '',
+    car_parks: '',
+    furnishing: '',
+    floor_height: '',
+    front_facing: '',
+    amenities: '',
+    highlight: '',
+    gated_community: false,
+    approach_road_width: '',
+    address_line1: '',
+    address_line2: '',
+    city: '',
+    pincode: '',
+    state: 'Kerala',
+    country: 'India',
+    key_dates: [{ id: null, date_label: '', due_date: '', remarks: '' }],
+    is_active: true
+  };
+
+  const [form, setForm] = useState(emptyForm);
+
+  const fetchCompanies = async () => {
+    try {
+      const r = await API.get(EP.companies);
+      const items = Array.isArray(r.data) ? r.data : r.data?.results || [];
+      setCompanies(items);
+    } catch {
+      setCompanies([]);
+    }
+  };
+
+  const fetchData = async () => {
+    try {
+      const [propRes] = await Promise.all([API.get(EP.properties)]);
+      const propertyList = Array.isArray(propRes.data) ? propRes.data : propRes.data?.results || [];
+      setProperties(propertyList);
+
+      await fetchCompanies();
+
+      // Contacts
+      let contactsList = [];
+      try {
+        const r1 = await API.get(EP.contactsList);
+        contactsList = Array.isArray(r1.data) ? r1.data : (r1.data?.results || []);
+      } catch {
+        try {
+          const idx = await API.get(EP.contactsIndex);
+          const link = idx.data?.contacts;
+          if (typeof link === 'string') {
+            const relative = link.replace((API.defaults.baseURL || ''), '');
+            const path = relative.startsWith('/') ? relative.slice(1) : relative;
+            const r2 = await API.get(path);
+            contactsList = Array.isArray(r2.data) ? r2.data : (r2.data?.results || []);
+          }
+        } catch {
+          contactsList = [];
+        }
+      }
+
+      setContacts(contactsList);
+
+      const onlyLandlords = (contactsList || []).filter(
+        c => Array.isArray(c.stakeholder_types) && c.stakeholder_types.includes('Landlord')
+      );
+      const onlyTenants = (contactsList || []).filter(
+        c => Array.isArray(c.stakeholder_types) && c.stakeholder_types.includes('Tenant')
+      );
+
+      const onlyPMs = (contactsList || []).filter(
+        c => Array.isArray(c.stakeholder_types) && c.stakeholder_types.includes('Project Manager')
+      );
+
+      setLandlords(onlyLandlords);
+      setTenants(onlyTenants);
+      setProjectManagers(onlyPMs);
+
+      setLandlordOptions(onlyLandlords.slice(0, 20));
+      setTenantOptions(onlyTenants.slice(0, 20));
+      setProjectManagerOptions(onlyPMs.slice(0, 20));
+    } catch (e) {
+      console.error('Fetch failed', e);
+      setSnackbar({ open: true, message: 'Failed to fetch data', severity: 'error' });
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const searchContacts = async (role, query) => {
+    const map = {
+      'Landlord': { setLoading: setLoadingLandlords, setOptions: setLandlordOptions, fallback: landlords },
+      'Tenant': { setLoading: setLoadingTenants, setOptions: setTenantOptions, fallback: tenants },
+      'Project Manager': { setLoading: setLoadingPMs, setOptions: setProjectManagerOptions, fallback: projectManagers },
+    };
+    const cfg = map[role];
+    if (!cfg) return;
+
+    cfg.setLoading(true);
+    try {
+      const r = await API.get(EP.contactsList, {
+        params: {
+          search: (query || '').trim() || undefined,
+          is_active: true,
+        },
+      });
+      const items = Array.isArray(r.data) ? r.data : (r.data?.results || []);
+      const filtered = items.filter(
+        c => Array.isArray(c.stakeholder_types) && c.stakeholder_types.includes(role)
+      );
+      cfg.setOptions(filtered);
+    } catch {
+      cfg.setOptions(cfg.fallback || []);
+    } finally {
+      cfg.setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const t = setTimeout(() => searchContacts('Landlord', landlordQuery), 300);
+    return () => clearTimeout(t);
+  }, [landlordQuery]); // eslint-disable-line
+
+  useEffect(() => {
+    const t = setTimeout(() => searchContacts('Tenant', tenantQuery), 300);
+    return () => clearTimeout(t);
+  }, [tenantQuery]); // eslint-disable-line
+
+  useEffect(() => {
+    const t = setTimeout(() => searchContacts('Project Manager', projectManagerQuery), 300);
+    return () => clearTimeout(t);
+  }, [projectManagerQuery]); // eslint-disable-line
+
+  const getContactId = (c) => c?.contact_id || c?.id;
+  const getContactLabel = (c) => c?.full_name || c?.email || `Contact ${getContactId(c) || ''}`;
+
+const isOptionEqual = (a, b) => !!a && !!b && String(getContactId(a)) === String(getContactId(b));
+
+  const findSelectedContact = (id, role) => {
+    if (!id) return null;
+    const pools = [
+      ...(role === 'Landlord' ? landlordOptions : role === 'Tenant' ? tenantOptions : projectManagerOptions),
+      ...(role === 'Landlord' ? landlords : role === 'Tenant' ? tenants : projectManagers),
+      ...contacts,
+    ];
+    return pools.find((c) => String(getContactId(c)) === String(id)) || null;
+  };
+
+  // Auto-populate Lease End Date when Lease Start Date changes (Rental purpose only) unless the user manually edited it
+  useEffect(() => {
+    if (form.purpose !== 'rental') return;
+    if (!form.lease_start_date) return;
+    if (leaseEndManuallyEdited) return;
+
+    const startISO = toISODate(form.lease_start_date);
+    const autoEnd = addMonthsISO(startISO, 11); // +11 months
+    setForm(prev => ({ ...prev, lease_end_date: autoEnd }));
+  }, [form.purpose, form.lease_start_date, leaseEndManuallyEdited]);
+
+  const validateForm = () => {
+    const required = ['company', 'name', 'location', 'purpose', 'status', 'landlord'];
+    for (const field of required) {
+      if (!form[field] || String(form[field]).trim() === '') {
+        setSnackbar({ open: true, message: `Please enter a valid ${field.replace('_', ' ')}`, severity: 'warning' });
+        return false;
+      }
+    }
+    if (form.pincode && !/^[0-9]{6}$/.test(form.pincode)) {
+      setSnackbar({ open: true, message: 'Pincode must be a 6-digit number', severity: 'warning' });
+      return false;
+    }
+    if (documents.length > 20) {
+      setSnackbar({ open: true, message: 'Cannot upload more than 20 documents', severity: 'warning' });
+      return false;
+    }
+    for (const doc of documents) {
+      if (!doc.name || doc.name.trim() === '') {
+        setSnackbar({ open: true, message: 'All documents must have a valid name', severity: 'warning' });
+        return false;
+      }
+    }
+    // key dates: allow empty rows, but if label provided, require due_date (and vice versa)
+    const invalidKD = (form.key_dates || []).some(kd => {
+      const hasAny = !!(kd.date_label || kd.due_date || kd.remarks);
+      if (!hasAny) return false;
+      return !(kd.date_label && kd.due_date);
+    });
+    if (invalidKD) {
+      setSnackbar({ open: true, message: 'Each key date needs both a Label and a Due Date', severity: 'warning' });
+      return false;
+    }
+    return true;
+  };
+
+  const handleAddOrUpdateProperty = async () => {
+    if (!canEdit) {
+      setSnackbar({ open: true, message: "You don't have permission to add or edit properties.", severity: 'error' });
+      return;
+    }
+    if (!validateForm()) return;
+
+    setUploading(true);
+    const formData = new FormData();
+    // don't include key_dates array in the property payload — we create them via separate endpoint
+    const { key_dates, ...rest } = form;
+    Object.entries(rest).forEach(([key, val]) => {
+      if (val !== null && val !== undefined && val !== '') formData.append(key, val);
+    });
+    formData.append('is_active', form.is_active);
+
+    try {
+      let response;
+      if (isEditMode && editId) {
+        response = await API.patch(`${EP.properties}${editId}/`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+      } else {
+        response = await API.post(EP.properties, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+      }
+
+      const propertyId = response.data.id;
+
+      if (documents.length > 0) {
+        for (let doc of documents) {
+          if (!doc.file) continue;
+          const docData = new FormData();
+          docData.append('property', propertyId);
+          docData.append('file_name', doc.name);
+          docData.append('file_url', doc.file);
+          await API.post(EP.propertyDocuments, docData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+        }
+      }
+
+      // create/append key dates (ignore blank rows)
+      const cleanKDs = (form.key_dates || []).filter(kd => kd.date_label && kd.due_date);
+      for (const kd of cleanKDs) {
+        await API.post(EP.propertyKeyDates, {
+          property: propertyId,
+          date_label: kd.date_label,
+          due_date: kd.due_date,
+          remarks: kd.remarks || '',
+        });
+      }
+
+      setSnackbar({ open: true, message: isEditMode ? 'Property updated successfully' : 'Property added successfully', severity: 'success' });
+      setOpen(false);
+      fetchData();
+      resetForm();
+    } catch (e) {
+      console.error('Save failed', e);
+      setSnackbar({ open: true, message: 'Failed to save property', severity: 'error' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const resetForm = () => {
+    setForm(emptyForm);
+    setDocuments([]);
+    setIsEditMode(false);
+    setEditId(null);
+    setActiveStep(0);
+    setLandlordQuery('');
+    setTenantQuery('');
+    setProjectManagerQuery('');
+    setLeaseEndManuallyEdited(false);
+  };
+
+  const openEditDialog = (prop) => {
+    if (!canEdit) {
+      setSnackbar({ open: true, message: "View-only: you can't edit properties.", severity: 'info' });
+      return;
+    }
+
+    const landlordId =
+      prop.landlord?.contact_id ||
+      prop.landlord_display?.contact_id ||
+      prop.landlord_id ||
+      prop.landlord ||
+      '';
+
+    const tenantId =
+      prop.tenant?.contact_id ||
+      prop.tenant_display?.contact_id ||
+      prop.tenant_id ||
+      prop.tenant ||
+      '';
+
+    const pmId =
+      prop.project_manager?.contact_id ||
+      prop.project_manager_display?.contact_id ||
+      prop.project_manager_id ||
+      prop.project_manager ||
+      '';
+
+    // map existing key dates into the editable array
+    const mappedKDs = Array.isArray(prop.key_dates) && prop.key_dates.length > 0
+      ? prop.key_dates.map(k => ({
+          id: k.id ?? null,
+          date_label: k.date_label || '',
+          due_date: toISODate(k.due_date) || '',
+          remarks: k.remarks || ''
+        }))
+      : [{ id: null, date_label: '', due_date: '', remarks: '' }];
+
+    setForm((prev) => ({
+      ...prev,
+      ...prop,
+      company: prop.company?.id || prop.company || '',
+      landlord: landlordId,
+      project_manager: pmId || '',
+      tenant: tenantId || '',
+      purpose: prop.purpose || 'rental',
+      status: prop.status || 'vacant',
+      is_active: prop.is_active,
+      property_type: prop.property_type || '',
+      config_bhk: prop.config_bhk || '',
+      config_bathroom: prop.config_bathroom || '',
+      build_up_area_sqft: prop.build_up_area_sqft || '',
+      land_area_cents: prop.land_area_cents || '',
+      balconies: prop.balconies || '',
+      car_parks: prop.car_parks || '',
+      furnishing: prop.furnishing || '',
+      floor_height: prop.floor_height || '',
+      front_facing: prop.front_facing || '',
+      amenities: prop.amenities || '',
+      highlight: prop.highlight || '',
+      gated_community: prop.gated_community || false,
+      approach_road_width: prop.approach_road_width || '',
+      monthly_rent: prop.monthly_rent || '',
+      expected_sale_price: prop.expected_sale_price || '',
+      expected_price: prop.expected_price || '',
+      igen_service_charge: prop.igen_service_charge || '',
+      address_line1: prop.address_line1 || '',
+      address_line2: prop.address_line2 || '',
+      city: prop.city || '',
+      pincode: prop.pincode || '',
+      state: prop.state || 'Kerala',
+      country: prop.country || 'India',
+
+      lease_start_date: toISODate(prop.lease_start_date) || '',
+      lease_end_date: toISODate(prop.lease_end_date) || '',
+      next_inspection_date: toISODate(prop.next_inspection_date) || '',
+
+      key_dates: mappedKDs,
+    }));
+
+    setDocuments(
+      Array.isArray(prop.document_urls)
+        ? prop.document_urls.map(d => ({ file: null, name: d.file_name, id: d.id }))
+        : []
+    );
+    setEditId(prop.id);
+    setIsEditMode(true);
+    setOpen(true);
+
+    // When editing an existing record, treat end date as "manually set" so we don't override it.
+    setLeaseEndManuallyEdited(!!prop.lease_end_date);
+
+    if (!landlordId) {
+      setSnackbar({ open: true, message: 'Warning: Landlord data not found for this property', severity: 'warning' });
+    }
+  };
+
+  const proceedToggle = async (id, isActive) => {
+    setSnackbar({ open: true, message: isActive ? 'Deactivating...' : 'Activating...', severity: 'info' });
+    try {
+      await API.patch(`${EP.properties}${id}/`, { is_active: !isActive });
+      fetchData();
+      setSnackbar({ open: true, message: isActive ? 'Property deactivated' : 'Property activated', severity: 'success' });
+    } catch {
+      setSnackbar({ open: true, message: 'Status update failed', severity: 'error' });
+    } finally {
+      setConfirmDialog({ open: false, id: null, isActive: false });
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (String(status || '').toLowerCase()) {
+      case 'occupied':
+      case 'owner occupied':
+      case 'tenant occupied':
+        return 'primary';
+      case 'vacant':
+        return 'warning';
+      case 'under maintenance':
+        return 'info';
+      default:
+        return 'default';
+    }
+  };
+
+  const isStepValid = () => {
+    switch (activeStep) {
+      case 0:
+        return form.company && form.name && form.location && form.purpose && form.status && form.landlord;
+      case 1: {
+        const { property_type, config_bhk, config_bathroom, build_up_area_sqft, land_area_cents, lease_start_date, lease_end_date, next_inspection_date, purpose } = form;
+        if (!property_type) return false;
+        if (property_type === 'apartment') {
+          if (!config_bhk || !config_bathroom || !build_up_area_sqft) return false;
+        } else if (property_type === 'villa') {
+          if (!config_bhk || !config_bathroom || !build_up_area_sqft || !land_area_cents) return false;
+        } else if (property_type === 'plot') {
+          if (!land_area_cents) return false;
+        } else if (property_type === 'commercial') {
+          if (!build_up_area_sqft || !land_area_cents) return false;
+        }
+        if (purpose === 'rental' && lease_start_date) {
+          const start = new Date(lease_start_date);
+          if (lease_end_date && new Date(lease_end_date) <= start) return false;
+          if (next_inspection_date && new Date(next_inspection_date) <= start) return false;
+        }
+        return true;
+      }
+      case 2:
+        return true;
+      case 3:
+        if (documents.length > 20) return false;
+        if (!documents.every(doc => doc.name && doc.name.trim() !== '')) return false;
+        return true;
+      default:
+        return true;
+    }
+  };
+
+  const handleNext = () => {
+    if (!canEdit) {
+      setSnackbar({ open: true, message: "View-only: you can't modify properties.", severity: 'info' });
+      return;
+    }
+    if (!isStepValid()) {
+      let message = 'Please complete required fields';
+      if (activeStep === 0) {
+        if (!form.company) message = 'Company is required';
+        else if (!form.name) message = 'Property name is required';
+        else if (!form.location) message = 'Location is required';
+        else if (!form.purpose) message = 'Purpose is required';
+        else if (!form.status) message = 'Status is required';
+        else if (!form.landlord) message = 'Landlord is required';
+      } else if (activeStep === 1) {
+        if (!form.property_type) message = 'Property type is required';
+        else if (form.property_type === 'apartment') {
+          if (!form.config_bhk) message = 'Number of bedrooms is required';
+          else if (!form.config_bathroom) message = 'Number of bathrooms is required';
+          else if (!form.build_up_area_sqft) message = 'Built-up area is required';
+        } else if (form.property_type === 'villa') {
+          if (!form.config_bhk) message = 'Number of bedrooms is required';
+          else if (!form.config_bathroom) message = 'Number of bathrooms is required';
+          else if (!form.build_up_area_sqft) message = 'Built-up area is required';
+          else if (!form.land_area_cents) message = 'Land area is required';
+        } else if (form.property_type === 'plot') {
+          if (!form.land_area_cents) message = 'Land area is required';
+        } else if (form.property_type === 'commercial') {
+          if (!form.build_up_area_sqft) message = 'Built-up area is required';
+          else if (!form.land_area_cents) message = 'Land area is required';
+        } else if (form.purpose === 'rental') {
+          if (form.lease_start_date && form.lease_end_date && new Date(form.lease_end_date) <= new Date(form.lease_start_date)) {
+            message = 'Lease End Date must be after Lease Start Date';
+          } else if (form.lease_start_date && form.next_inspection_date && new Date(form.next_inspection_date) <= new Date(form.lease_start_date)) {
+            message = 'Next Inspection Date must be after Lease Start Date';
+          }
+        }
+      } else if (activeStep === 3) {
+        if (documents.length > 20) {
+          message = 'Cannot upload more than 20 documents';
+        } else if (documents.some(doc => !doc.name || doc.name.trim() === '')) {
+          message = 'All documents must have a valid name';
+        } else {
+          const invalidKD = (form.key_dates || []).some(kd => {
+            const hasAny = !!(kd.date_label || kd.due_date || kd.remarks);
+            if (!hasAny) return false;
+            return !(kd.date_label && kd.due_date);
+          });
+          if (invalidKD) message = 'Each key date needs both a Label and a Due Date';
+        }
+      }
+      setSnackbar({ open: true, message, severity: 'warning' });
+      return;
+    }
+
+    if (activeStep < steps.length - 1) {
+      setActiveStep((prev) => prev + 1);
+    } else {
+      handleAddOrUpdateProperty();
+    }
+  };
+
+  const handleBack = () => setActiveStep(prev => prev - 1);
+  const handleFilesChange = (updatedFiles) => setDocuments(updatedFiles);
+
+  const addKeyDateRow = () => {
+    setForm(prev => ({
+      ...prev,
+      key_dates: [...(prev.key_dates || []), { id: null, date_label: '', due_date: '', remarks: '' }]
+    }));
+  };
+
+  const removeKeyDateRow = (idx) => {
+    setForm(prev => {
+      const next = [...(prev.key_dates || [])];
+      next.splice(idx, 1);
+      return { ...prev, key_dates: next.length ? next : [{ id: null, date_label: '', due_date: '', remarks: '' }] };
+    });
+  };
+
+  const updateKeyDateField = (idx, field, newValue) => {
+  setForm(prev => {
+    const next = [...(prev.key_dates || [])];
+    next[idx] = { ...next[idx], [field]: field === "due_date" ? toISODate(newValue) : newValue };
+    return { ...prev, key_dates: next };
+  });
+};
+      return { ...prev, key_dates: next };
+    });
+  };
+
+  const filteredProperties = (Array.isArray(properties) ? properties : []).filter((prop) =>
+    (prop.name || '').toLowerCase().includes(searchText.toLowerCase())
+  );
+
+  const paginatedProperties = filteredProperties.slice(
+    page * rowsPerPage,
+    page * rowsPerPage + rowsPerPage
+  );
+
+  const priceCell = (prop) => {
+    if (prop.expected_price) return prop.expected_price;
+    if (prop.purpose === 'rental') return prop.monthly_rent ?? '-';
+    return prop.expected_sale_price ?? '-';
+  };
+
+  const landlordSelected = findSelectedContact(form.landlord, 'Landlord');
+  const tenantSelected = findSelectedContact(form.tenant, 'Tenant');
+  const pmSelected = findSelectedContact(form.project_manager, 'Project Manager');
+
+  const renderStepContent = (step) => {
+    const statusOptions = {
+      care: ['occupied', 'vacant', 'under maintenance'],
+      rental: ['occupied', 'vacant', 'under maintenance'],
+      sale: ['owner occupied', 'tenant occupied', 'vacant', 'under maintenance']
+    };
+
+    switch (step) {
+      case 0:
+        return (
+          <Box p={2}>
+            <TextField
+              select
+              fullWidth
+              label="Company *"
+              margin="dense"
+              value={form.company}
+              onChange={(e) => setForm({ ...form, company: e.target.value })}
+              disabled={!canEdit}
+            >
+              <MenuItem value="">Select a company</MenuItem>
+              {companies.map(c => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
+            </TextField>
+
+            <TextField
+              label="Property Name *"
+              fullWidth
+              margin="dense"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              disabled={!canEdit}
+            />
+
+            <TextField
+              label="Location *"
+              fullWidth
+              margin="dense"
+              value={form.location}
+              onChange={(e) => setForm({ ...form, location: e.target.value })}
+              disabled={!canEdit}
+            />
+
+            <Autocomplete
+              options={landlordOptions}
+              loading={loadingLandlords}
+              value={landlordSelected}
+              onChange={(_, newVal) => {
+                if (!canEdit) return;
+                setForm({ ...form, landlord: getContactId(newVal) || '' });
+              }}
+              inputValue={landlordQuery}
+              onInputChange={(_, newInput) => canEdit && setLandlordQuery(newInput)}
+              getOptionLabel={(opt) => getContactLabel(opt)}
+              isOptionEqualToValue={isOptionEqual}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Landlord *"
+                  margin="dense"
+                  fullWidth
+                  disabled={!canEdit}
+                  helperText="Type to search by name, email or phone"
+                  InputProps={{
+                    ...params.InputProps,
+                    endAdornment: (
+                      <>
+                        {loadingLandlords ? <CircularProgress size={16} /> : null}
+                        {params.InputProps.endAdornment}
+                      </>
+                    ),
+                  }}
+                />
+              )}
+              noOptionsText={landlordQuery ? 'No matching landlords' : 'Type to search landlords'}
+            />
+
+            <Autocomplete
+              options={projectManagerOptions}
+              loading={loadingPMs}
+              value={pmSelected}
+              onChange={(_, newVal) => {
+                if (!canEdit) return;
+                setForm({ ...form, project_manager: getContactId(newVal) || '' });
+              }}
+              inputValue={projectManagerQuery}
+              onInputChange={(_, newInput) => canEdit && setProjectManagerQuery(newInput)}
+              getOptionLabel={(opt) => getContactLabel(opt)}
+              isOptionEqualToValue={isOptionEqual}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Project Manager (optional)"
+                  margin="dense"
+                  fullWidth
+                  disabled={!canEdit}
+                  helperText="Type to search project managers"
+                  InputProps={{
+                    ...params.InputProps,
+                    endAdornment: (
+                      <>
+                        {loadingPMs ? <CircularProgress size={16} /> : null}
+                        {params.InputProps.endAdornment}
+                      </>
+                    ),
+                  }}
+                />
+              )}
+              clearOnBlur={false}
+              noOptionsText={projectManagerQuery ? 'No matching project managers' : 'Type to search project managers'}
+            />
+
+            <TextField
+              select
+              fullWidth
+              label="Purpose *"
+              margin="dense"
+              value={form.purpose}
+              onChange={(e) => setForm({ ...form, purpose: e.target.value })}
+              disabled={!canEdit}
+            >
+              <MenuItem value="rental">Rental</MenuItem>
+              <MenuItem value="sale">Sale</MenuItem>
+              <MenuItem value="care">Care</MenuItem>
+            </TextField>
+
+            <TextField
+              select
+              fullWidth
+              label="Status *"
+              margin="dense"
+              value={form.status}
+              onChange={(e) => setForm({ ...form, status: e.target.value })}
+              disabled={!canEdit}
+            >
+              <MenuItem value="">Select Status</MenuItem>
+              {statusOptions[form.purpose].map(s => (
+                <MenuItem key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</MenuItem>
+              ))}
+            </TextField>
+
+            <Autocomplete
+              options={tenantOptions}
+              loading={loadingTenants}
+              value={tenantSelected}
+              onChange={(_, newVal) => {
+                if (!canEdit) return;
+                setForm({ ...form, tenant: getContactId(newVal) || '' });
+              }}
+              inputValue={tenantQuery}
+              onInputChange={(_, newInput) => canEdit && setTenantQuery(newInput)}
+              getOptionLabel={(opt) => getContactLabel(opt)}
+              isOptionEqualToValue={isOptionEqual}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Tenant (optional)"
+                  margin="dense"
+                  fullWidth
+                  disabled={!canEdit}
+                  helperText="Leave empty if there is no tenant yet"
+                  InputProps={{
+                    ...params.InputProps,
+                    endAdornment: (
+                      <>
+                        {loadingTenants ? <CircularProgress size={16} /> : null}
+                        {params.InputProps.endAdornment}
+                      </>
+                    ),
+                  }}
+                />
+              )}
+              clearOnBlur={false}
+              noOptionsText={tenantQuery ? 'No matching tenants' : 'Type to search tenants'}
+            />
+
+            <FormControl component="fieldset" sx={{ mt: 2 }}>
+              <FormLabel component="legend">Property Status</FormLabel>
+              <RadioGroup
+                row
+                value={form.is_active ? 'active' : 'inactive'}
+                onChange={(e) => canEdit && setForm({ ...form, is_active: e.target.value === 'active' })}
+                sx={{ gap: 2 }}
+              >
+                <FormControlLabel value="active" control={<Radio />} label="Active" />
+                <FormControlLabel value="inactive" control={<Radio />} label="Inactive" />
+              </RadioGroup>
+            </FormControl>
+          </Box>
+        );
+
+      case 1:
+        return (
+          <Box p={2}>
+            <TextField
+              select
+              fullWidth
+              label="Property Type *"
+              margin="dense"
+              value={form.property_type}
+              onChange={(e) => setForm({ ...form, property_type: e.target.value })}
+              disabled={!canEdit}
+            >
+              <MenuItem value="">Select type</MenuItem>
+              <MenuItem value="apartment">Apartment</MenuItem>
+              <MenuItem value="villa">Villa</MenuItem>
+              <MenuItem value="plot">Plot</MenuItem>
+              <MenuItem value="commercial">Commercial</MenuItem>
+            </TextField>
+
+            {form.property_type === 'apartment' && (
+              <>
+                <TextField label="Number of Bedrooms *" {...numberNoScroll} fullWidth margin="dense" value={form.config_bhk} onChange={(e) => setForm({ ...form, config_bhk: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Bathrooms *" {...numberNoScroll} fullWidth margin="dense" value={form.config_bathroom} onChange={(e) => setForm({ ...form, config_bathroom: e.target.value })} disabled={!canEdit} />
+                <TextField label="Built-up Area (Sq Ft) *" {...numberNoScroll} fullWidth margin="dense" value={form.build_up_area_sqft} onChange={(e) => setForm({ ...form, build_up_area_sqft: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Balconies" {...numberNoScroll} fullWidth margin="dense" value={form.balconies} onChange={(e) => setForm({ ...form, balconies: e.target.value })} disabled={!canEdit} />
+                <FormControl component="fieldset" sx={{ mt: 2 }}>
+                  <FormLabel component="legend">Furnishing</FormLabel>
+                  <RadioGroup row value={form.furnishing} onChange={(e) => canEdit && setForm({ ...form, furnishing: e.target.value })}>
+                    <FormControlLabel value="fully" control={<Radio />} label="Fully" />
+                    <FormControlLabel value="semi" control={<Radio />} label="Semi" />
+                    <FormControlLabel value="none" control={<Radio />} label="None" />
+                  </RadioGroup>
+                </FormControl>
+                <TextField label="Floor Height" {...numberNoScroll} fullWidth margin="dense" value={form.floor_height} onChange={(e) => setForm({ ...form, floor_height: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Car Parks" {...numberNoScroll} fullWidth margin="dense" value={form.car_parks} onChange={(e) => setForm({ ...form, car_parks: e.target.value })} disabled={!canEdit} />
+                <TextField label="Front Facing" fullWidth margin="dense" value={form.front_facing} onChange={(e) => setForm({ ...form, front_facing: e.target.value })} disabled={!canEdit} />
+                <TextField label="Amenities" fullWidth margin="dense" multiline minRows={2} value={form.amenities} onChange={(e) => setForm({ ...form, amenities: e.target.value })} disabled={!canEdit} />
+                <TextField label="Highlight" fullWidth margin="dense" multiline minRows={2} value={form.highlight} onChange={(e) => setForm({ ...form, highlight: e.target.value })} disabled={!canEdit} />
+              </>
+            )}
+
+            {form.property_type === 'villa' && (
+              <>
+                <TextField label="Number of Bedrooms *" {...numberNoScroll} fullWidth margin="dense" value={form.config_bhk} onChange={(e) => setForm({ ...form, config_bhk: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Bathrooms *" {...numberNoScroll} fullWidth margin="dense" value={form.config_bathroom} onChange={(e) => setForm({ ...form, config_bathroom: e.target.value })} disabled={!canEdit} />
+                <TextField label="Built-up Area (Sq Ft) *" {...numberNoScroll} fullWidth margin="dense" value={form.build_up_area_sqft} onChange={(e) => setForm({ ...form, build_up_area_sqft: e.target.value })} disabled={!canEdit} />
+                <FormControlLabel control={<Checkbox checked={!!form.gated_community} onChange={(e) => canEdit && setForm({ ...form, gated_community: e.target.checked })} />} label="Gated Community" sx={{ mt: 1 }} />
+                <TextField label="Land Area (Cents) *" {...numberNoScroll} fullWidth margin="dense" value={form.land_area_cents} onChange={(e) => setForm({ ...form, land_area_cents: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Car Parks" {...numberNoScroll} fullWidth margin="dense" value={form.car_parks} onChange={(e) => setForm({ ...form, car_parks: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Balconies" {...numberNoScroll} fullWidth margin="dense" value={form.balconies} onChange={(e) => setForm({ ...form, balconies: e.target.value })} disabled={!canEdit} />
+                <TextField label="Front Facing" fullWidth margin="dense" value={form.front_facing} onChange={(e) => setForm({ ...form, front_facing: e.target.value })} disabled={!canEdit} />
+                <TextField label="Amenities" fullWidth margin="dense" multiline minRows={2} value={form.amenities} onChange={(e) => setForm({ ...form, amenities: e.target.value })} disabled={!canEdit} />
+                <FormControl component="fieldset" sx={{ mt: 2 }}>
+                  <FormLabel component="legend">Furnishing</FormLabel>
+                  <RadioGroup row value={form.furnishing} onChange={(e) => canEdit && setForm({ ...form, furnishing: e.target.value })}>
+                    <FormControlLabel value="fully" control={<Radio />} label="Fully" />
+                    <FormControlLabel value="semi" control={<Radio />} label="Semi" />
+                    <FormControlLabel value="none" control={<Radio />} label="None" />
+                  </RadioGroup>
+                </FormControl>
+                <TextField label="Highlight" fullWidth margin="dense" multiline minRows={2} value={form.highlight} onChange={(e) => setForm({ ...form, highlight: e.target.value })} disabled={!canEdit} />
+              </>
+            )}
+
+            {form.property_type === 'plot' && (
+              <>
+                <FormControlLabel control={<Checkbox checked={!!form.gated_community} onChange={(e) => canEdit && setForm({ ...form, gated_community: e.target.checked })} />} label="Gated Community" sx={{ mt: 1 }} />
+                <TextField label="Land Area (Cents) *" {...numberNoScroll} fullWidth margin="dense" value={form.land_area_cents} onChange={(e) => setForm({ ...form, land_area_cents: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Car Parks" {...numberNoScroll} fullWidth margin="dense" value={form.car_parks} onChange={(e) => setForm({ ...form, car_parks: e.target.value })} disabled={!canEdit} />
+                <TextField label="Approach Road Width" {...numberNoScroll} fullWidth margin="dense" value={form.approach_road_width} onChange={(e) => setForm({ ...form, approach_road_width: e.target.value })} disabled={!canEdit} />
+                <TextField label="Amenities" fullWidth margin="dense" multiline minRows={2} value={form.amenities} onChange={(e) => setForm({ ...form, amenities: e.target.value })} disabled={!canEdit} />
+                <FormControl component="fieldset" sx={{ mt: 2 }}>
+                  <FormLabel component="legend">Furnishing</FormLabel>
+                  <RadioGroup row value={form.furnishing} onChange={(e) => canEdit && setForm({ ...form, furnishing: e.target.value })}>
+                    <FormControlLabel value="fully" control={<Radio />} label="Fully" />
+                    <FormControlLabel value="semi" control={<Radio />} label="Semi" />
+                    <FormControlLabel value="none" control={<Radio />} label="None" />
+                  </RadioGroup>
+                </FormControl>
+                <TextField label="Highlight" fullWidth margin="dense" multiline minRows={2} value={form.highlight} onChange={(e) => setForm({ ...form, highlight: e.target.value })} disabled={!canEdit} />
+              </>
+            )}
+
+            {form.property_type === 'commercial' && (
+              <>
+                <TextField label="Built-up Area (Sq Ft) *" {...numberNoScroll} fullWidth margin="dense" value={form.build_up_area_sqft} onChange={(e) => setForm({ ...form, build_up_area_sqft: e.target.value })} disabled={!canEdit} />
+                <TextField label="Land Area (Cents) *" {...numberNoScroll} fullWidth margin="dense" value={form.land_area_cents} onChange={(e) => setForm({ ...form, land_area_cents: e.target.value })} disabled={!canEdit} />
+                <TextField label="Number of Car Parks" {...numberNoScroll} fullWidth margin="dense" value={form.car_parks} onChange={(e) => setForm({ ...form, car_parks: e.target.value })} disabled={!canEdit} />
+                <TextField label="Approach Road Width" {...numberNoScroll} fullWidth margin="dense" value={form.approach_road_width} onChange={(e) => setForm({ ...form, approach_road_width: e.target.value })} disabled={!canEdit} />
+                <TextField label="Floor Height" {...numberNoScroll} fullWidth margin="dense" value={form.floor_height} onChange={(e) => setForm({ ...form, floor_height: e.target.value })} disabled={!canEdit} />
+                <FormControl component="fieldset" sx={{ mt: 2 }}>
+                  <FormLabel component="legend">Furnishing</FormLabel>
+                  <RadioGroup row value={form.furnishing} onChange={(e) => canEdit && setForm({ ...form, furnishing: e.target.value })}>
+                    <FormControlLabel value="fully" control={<Radio />} label="Fully" />
+                    <FormControlLabel value="semi" control={<Radio />} label="Semi" />
+                    <FormControlLabel value="none" control={<Radio />} label="None" />
+                  </RadioGroup>
+                </FormControl>
+                <TextField label="Highlight" fullWidth margin="dense" multiline minRows={2} value={form.highlight} onChange={(e) => setForm({ ...form, highlight: e.target.value })} disabled={!canEdit} />
+              </>
+            )}
+
+            {form.purpose === 'rental' && (
+              <>
+                <TextField label="Monthly Rent" {...numberNoScroll} fullWidth margin="dense" value={form.monthly_rent} onChange={(e) => setForm({ ...form, monthly_rent: e.target.value })} disabled={!canEdit} />
+                <TextField
+                  type="date"
+                  label="Lease Start Date"
+                  fullWidth
+                  margin="dense"
+                  InputLabelProps={{ shrink: true }}
+                  value={form.lease_start_date}
+                  onChange={(e) => {
+                    setLeaseEndManuallyEdited(false); // when start changes, allow auto-calc again unless user later edits end
+                    setForm({ ...form, lease_start_date: toISODate(e.target.value) });
+                  }}
+                  disabled={!canEdit}
+                />
+                <TextField
+                  type="date"
+                  label="Lease End Date"
+                  fullWidth
+                  margin="dense"
+                  InputLabelProps={{ shrink: true }}
+                  value={form.lease_end_date}
+                  onChange={(e) => {
+                    setLeaseEndManuallyEdited(true); // user is overriding auto date
+                    setForm({ ...form, lease_end_date: toISODate(e.target.value) });
+                  }}
+                  disabled={!canEdit}
+                />
+                <TextField
+                  type="date"
+                  label="Next Inspection Date"
+                  fullWidth
+                  margin="dense"
+                  InputLabelProps={{ shrink: true }}
+                  value={form.next_inspection_date}
+                  onChange={(e) => setForm({ ...form, next_inspection_date: toISODate(e.target.value) })}
+                  disabled={!canEdit}
+                />
+              </>
+            )}
+            {form.purpose === 'sale' && (
+              <TextField label="Expected Sale Price" {...numberNoScroll} fullWidth margin="dense" value={form.expected_sale_price} onChange={(e) => setForm({ ...form, expected_sale_price: e.target.value })} disabled={!canEdit} />
+            )}
+
+            <TextField label="Expected Price (Neutral)" {...numberNoScroll} fullWidth margin="dense" value={form.expected_price} onChange={(e) => setForm({ ...form, expected_price: e.target.value })} disabled={!canEdit} />
+
+            {/* NEW: IGEN Service Charge */}
+            <TextField
+              label="IGEN Service Charge"
+              {...numberNoScroll}
+              fullWidth
+              margin="dense"
+              value={form.igen_service_charge}
+              onChange={(e) => setForm({ ...form, igen_service_charge: e.target.value })}
+              disabled={!canEdit}
+            />
+          </Box>
+        );
+
+      case 2:
+        return (
+          <Box p={2}>
+            <TextField label="Address Line 1" fullWidth margin="dense" value={form.address_line1} onChange={(e) => setForm({ ...form, address_line1: e.target.value })} disabled={!canEdit} />
+            <TextField label="Address Line 2" fullWidth margin="dense" value={form.address_line2} onChange={(e) => setForm({ ...form, address_line2: e.target.value })} disabled={!canEdit} />
+            <TextField label="City" fullWidth margin="dense" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} disabled={!canEdit} />
+            <TextField label="Pincode" fullWidth margin="dense" value={form.pincode} onChange={(e) => setForm({ ...form, pincode: e.target.value })} disabled={!canEdit} />
+            <TextField label="State" fullWidth margin="dense" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} disabled={!canEdit} />
+            <TextField label="Country" fullWidth margin="dense" value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} disabled={!canEdit} />
+          </Box>
+        );
+
+      case 3:
+        return (
+          <Box p={2}>
+            <TextField label="Remarks" fullWidth multiline margin="dense" value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} disabled={!canEdit} />
+            <Box sx={{ opacity: canEdit ? 1 : 0.6, pointerEvents: canEdit ? 'auto' : 'none' }}>
+              <FileUploader
+                onFilesChange={handleFilesChange}
+                uploading={uploading}
+                selectedFiles={documents}
+                setSelectedFiles={setDocuments}
+              />
+            </Box>
+
+            <Typography sx={{ mt: 3, fontWeight: 'bold' }}>Key Dates (Add multiple)</Typography>
+
+            {(form.key_dates || []).map((kd, idx) => (
+              <Grid container spacing={2} key={idx} sx={{ mt: 1, alignItems: 'center' }}>
+                <Grid item xs={12} md={4}>
+                  <TextField
+                    label="Date Label"
+                    fullWidth
+                    margin="dense"
+                    value={kd.date_label}
+                    onChange={(e) => updateKeyDateField(idx, 'date_label', e.target.value)}
+                    disabled={!canEdit}
+                  />
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <TextField
+                    type="date"
+                    label="Due Date"
+                    fullWidth
+                    margin="dense"
+                    InputLabelProps={{ shrink: true }}
+                    value={kd.due_date}
+                    onChange={(e) => updateKeyDateField(idx, 'due_date', e.target.value)}
+                    disabled={!canEdit}
+                  />
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField
+                    label="Remarks"
+                    fullWidth
+                    margin="dense"
+                    value={kd.remarks}
+                    onChange={(e) => updateKeyDateField(idx, 'remarks', e.target.value)}
+                    disabled={!canEdit}
+                  />
+                </Grid>
+                <Grid item xs={12} md={1} sx={{ display: 'flex', justifyContent: 'center' }}>
+                  <Tooltip title="Remove">
+                    <span>
+                      <IconButton onClick={() => removeKeyDateRow(idx)} disabled={!canEdit}>
+                        <Delete />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </Grid>
+              </Grid>
+            ))}
+
+            <Box sx={{ mt: 1 }}>
+              <Button
+                variant="outlined"
+                startIcon={<Add />}
+                onClick={addKeyDateRow}
+                disabled={!canEdit}
+              >
+                Add another date
+              </Button>
+            </Box>
+          </Box>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="p-[35px]">
+      <Typography variant="h5" fontWeight="bold">Property Management</Typography>
+
+      <div className="flex justify-between items-center mt-6 mb-6 flex-wrap gap-4">
+        <div className="flex-1 max-w-sm">
+          <TextField
+            label="Search by Name"
+            variant="outlined"
+            size="small"
+            fullWidth
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="Type property name..."
+            InputProps={{
+              startAdornment: (
+                <span className="material-icons text-gray-500 mr-2">search</span>
+              ),
+              sx: { borderRadius: 3, backgroundColor: '#fafafa' }
+            }}
+          />
+        </div>
+
+        {canEdit && (
+          <Button
+            variant="contained"
+            color="primary"
+            onClick={() => {
+              resetForm();
+              setOpen(true);
+              setIsEditMode(false);
+            }}
+          >
+            ADD PROPERTY
+          </Button>
+        )}
+      </div>
+
+      <Card sx={{ borderRadius: 3 }}>
+        <CardContent>
+          <TableContainer>
+            <Table size="small">
+              <TableHead sx={{ backgroundColor: '#e3f2fd' }}>
+                <TableRow>
+                  <TableCell><strong>#</strong></TableCell>
+                  <TableCell><strong>Company</strong></TableCell>
+                  <TableCell><strong>Name</strong></TableCell>
+                  <TableCell><strong>Status</strong></TableCell>
+                  <TableCell><strong>Location</strong></TableCell>
+                  <TableCell><strong>Type</strong></TableCell>
+                  <TableCell><strong>Area</strong></TableCell>
+                  <TableCell><strong>Price</strong></TableCell>
+                  <TableCell><strong>Actions</strong></TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {paginatedProperties.map((prop, index) => (
+                  <React.Fragment key={prop.id}>
+                    <TableRow sx={{ backgroundColor: prop.is_active ? '#e8f5e9' : '#fffde7' }}>
+                      <TableCell>
+                        <IconButton size="small" onClick={() => setExpandedRow(expandedRow === prop.id ? null : prop.id)}>
+                          {expandedRow === prop.id ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
+                        </IconButton>
+                        {page * rowsPerPage + index + 1}
+                      </TableCell>
+                      <TableCell>{prop.company_name || '-'}</TableCell>
+                      <TableCell>{prop.name || '-'}</TableCell>
+                      <TableCell>
+                        <Chip
+                          label={prop.status || 'Unknown'}
+                          color={getStatusColor(prop.status)}
+                          size="small"
+                          sx={{ textTransform: 'capitalize' }}
+                        />
+                      </TableCell>
+                      <TableCell>{prop.location || '-'}</TableCell>
+                      <TableCell>{prop.property_type || '-'}</TableCell>
+                      <TableCell>{prop.build_up_area_sqft ? `${prop.build_up_area_sqft} sqft` : '-'}</TableCell>
+                      <TableCell>{priceCell(prop)}</TableCell>
+                      <TableCell>
+                        <Tooltip title={canEdit ? 'Edit' : 'View only'}>
+                          <span>
+                            <IconButton
+                              color="primary"
+                              onClick={() => openEditDialog(prop)}
+                              disabled={!canEdit}
+                            >
+                              <Edit />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      </TableCell>
+                    </TableRow>
+
+                    <TableRow sx={{ backgroundColor: '#f5f6f5' }}>
+                      <TableCell colSpan={9} sx={{ p: 0, border: 0 }}>
+                        <Collapse in={expandedRow === prop.id} timeout="auto" unmountOnExit>
+                          <Box sx={{ m: 2, backgroundColor: '#fafafa', borderRadius: 2, p: 2, boxShadow: 1 }}>
+                            <Typography variant="subtitle1" fontWeight="bold" mb={2} sx={{ color: '#1976d2' }}>
+                              Property Details
+                            </Typography>
+                            <Grid container spacing={4}>
+                              {/* General Information */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>General Information</Typography>
+                                <Table size="small">
+                                  <TableBody>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Company:</TableCell>
+                                      <TableCell>{prop.company_name || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Property Name:</TableCell>
+                                      <TableCell>{prop.name || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Location:</TableCell>
+                                      <TableCell>{prop.location || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Purpose:</TableCell>
+                                      <TableCell>{prop.purpose ? prop.purpose.charAt(0).toUpperCase() + prop.purpose.slice(1) : '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Status:</TableCell>
+                                      <TableCell>{prop.status ? prop.status.charAt(0).toUpperCase() + prop.status.slice(1) : '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Active:</TableCell>
+                                      <TableCell>{prop.is_active ? 'Yes' : 'No'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Landlord:</TableCell>
+                                      <TableCell>{prop.landlord_display?.full_name || prop.landlord_display?.email || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Project Manager:</TableCell>
+                                      <TableCell>{prop.project_manager_display?.full_name || prop.project_manager_display?.email || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Tenant:</TableCell>
+                                      <TableCell colSpan={3}>{prop.tenant_display?.full_name || prop.tenant_display?.email || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Remarks:</TableCell>
+                                      <TableCell colSpan={3}>{prop.remarks || 'None'}</TableCell>
+                                    </TableRow>
+                                  </TableBody>
+                                </Table>
+                              </Grid>
+
+                              {/* Property Configuration */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Property Configuration</Typography>
+                                <Table size="small">
+                                  <TableBody>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Property Type:</TableCell>
+                                      <TableCell>{prop.property_type ? prop.property_type.charAt(0).toUpperCase() + prop.property_type.slice(1) : '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Bedrooms (BHK):</TableCell>
+                                      <TableCell>{prop.config_bhk || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Bathrooms:</TableCell>
+                                      <TableCell>{prop.config_bathroom || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Built-up Area:</TableCell>
+                                      <TableCell>{prop.build_up_area_sqft ? `${prop.build_up_area_sqft} sqft` : '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Land Area:</TableCell>
+                                      <TableCell>{prop.land_area_cents ? `${prop.land_area_cents} cents` : '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Balconies:</TableCell>
+                                      <TableCell>{prop.balconies || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Car Parks:</TableCell>
+                                      <TableCell>{prop.car_parks || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Furnishing:</TableCell>
+                                      <TableCell>{prop.furnishing ? prop.furnishing.charAt(0).toUpperCase() + prop.furnishing.slice(1) : '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Floor Height:</TableCell>
+                                      <TableCell>{prop.floor_height || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Front Facing:</TableCell>
+                                      <TableCell>{prop.front_facing || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Gated Community:</TableCell>
+                                      <TableCell>{prop.gated_community ? 'Yes' : 'No'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Approach Road Width:</TableCell>
+                                      <TableCell>{prop.approach_road_width || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Amenities:</TableCell>
+                                      <TableCell colSpan={3}>{prop.amenities || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Highlight:</TableCell>
+                                      <TableCell colSpan={3}>{prop.highlight || '-'}</TableCell>
+                                    </TableRow>
+                                  </TableBody>
+                                </Table>
+                              </Grid>
+
+                              {/* Financial Details */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Financial Details</Typography>
+                                <Table size="small">
+                                  <TableBody>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Monthly Rent:</TableCell>
+                                      <TableCell>{prop.monthly_rent ? `₹${prop.monthly_rent}` : '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Expected Sale Price:</TableCell>
+                                      <TableCell>{prop.expected_sale_price ? `₹${prop.expected_sale_price}` : '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Expected Price (Neutral):</TableCell>
+                                      <TableCell>{prop.expected_price ? `₹${prop.expected_price}` : '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Service Charge:</TableCell>
+                                      <TableCell>{prop.igen_service_charge ? `₹${prop.igen_service_charge}` : '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Lease Start Date:</TableCell>
+                                      <TableCell>{prop.lease_start_date || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Lease End Date:</TableCell>
+                                      <TableCell>{prop.lease_end_date || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Next Inspection Date:</TableCell>
+                                      <TableCell>{prop.next_inspection_date || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}></TableCell>
+                                      <TableCell></TableCell>
+                                    </TableRow>
+                                  </TableBody>
+                                </Table>
+                              </Grid>
+
+                              {/* Address */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Address</Typography>
+                                <Table size="small">
+                                  <TableBody>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Address Line 1:</TableCell>
+                                      <TableCell>{prop.address_line1 || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Address Line 2:</TableCell>
+                                      <TableCell>{prop.address_line2 || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>City:</TableCell>
+                                      <TableCell>{prop.city || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Pincode:</TableCell>
+                                      <TableCell>{prop.pincode || '-'}</TableCell>
+                                    </TableRow>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>State:</TableCell>
+                                      <TableCell>{prop.state || '-'}</TableCell>
+                                      <TableCell sx={{ fontWeight: 'bold' }}>Country:</TableCell>
+                                      <TableCell>{prop.country || '-'}</TableCell>
+                                    </TableRow>
+                                  </TableBody>
+                                </Table>
+                              </Grid>
+
+                              {/* Key Dates */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Key Dates</Typography>
+                                {Array.isArray(prop.key_dates) && prop.key_dates.length > 0 ? (
+                                  <Table size="small">
+                                    <TableBody>
+                                      {prop.key_dates.map(kd => (
+                                        <TableRow key={kd.id}>
+                                          <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>{kd.date_label || 'Date'}:</TableCell>
+                                          <TableCell>{kd.due_date || '-'}</TableCell>
+                                          <TableCell sx={{ fontWeight: 'bold', width: '25%' }}>Remarks:</TableCell>
+                                          <TableCell>{kd.remarks || '-'}</TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                ) : (
+                                  <Typography sx={{ fontStyle: 'italic', color: 'text.secondary' }}>
+                                    No key dates available
+                                  </Typography>
+                                )}
+                              </Grid>
+
+                              {/* Documents */}
+                              <Grid item xs={12}>
+                                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Documents</Typography>
+                                {Array.isArray(prop.document_urls) && prop.document_urls.length > 0 ? (
+                                  <Grid container spacing={2}>
+                                    {prop.document_urls.map((doc, idx) => {
+                                      const fullUrl = getFileUrl(API.defaults.baseURL, doc.file_url);
+                                      const isPDF = (fullUrl || '').toLowerCase().endsWith('.pdf');
+                                      if (!doc.file_url) return null;
+                                      return (
+                                        <Grid item xs={6} sm={4} md={3} key={idx}>
+                                          <Box
+                                            sx={{
+                                              border: '1px solid #ddd',
+                                              borderRadius: 2,
+                                              p: 1,
+                                              boxShadow: 1,
+                                              backgroundColor: '#ffffff',
+                                              textAlign: 'center',
+                                              transition: 'transform 0.2s',
+                                              '&:hover': { transform: 'scale(1.03)', boxShadow: 3 }
+                                            }}
+                                          >
+                                            <Typography variant="body2" sx={{ mb: 1 }}>{doc.file_name}</Typography>
+                                            {isPDF ? (
+                                              <Box
+                                                sx={{
+                                                  height: 60,
+                                                  display: 'flex',
+                                                  alignItems: 'center',
+                                                  justifyContent: 'center',
+                                                  backgroundColor: '#f5f5f5',
+                                                  borderRadius: 1.5,
+                                                  fontWeight: 'bold',
+                                                  color: '#1976d2',
+                                                  fontSize: 14
+                                                }}
+                                              >
+                                                PDF Document
+                                              </Box>
+                                            ) : (
+                                              <img
+                                                src={fullUrl}
+                                                alt={`Document ${idx + 1}`}
+                                                style={{ width: '100%', height: 60, objectFit: 'cover', borderRadius: 6 }}
+                                                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                              />
+                                            )}
+                                            <Link
+                                              href={fullUrl}
+                                              target="_blank"
+                                              rel="noopener"
+                                              underline="hover"
+                                              sx={{ display: 'block', mt: 1, fontSize: 13, color: '#1976d2' }}
+                                            >
+                                              View / Download
+                                            </Link>
+                                          </Box>
+                                        </Grid>
+                                      );
+                                    })}
+                                  </Grid>
+                                ) : (
+                                  <Typography sx={{ fontStyle: 'italic', color: 'text.secondary' }}>
+                                    No documents available
+                                  </Typography>
+                                )}
+                              </Grid>
+                            </Grid>
+                          </Box>
+                        </Collapse>
+                      </TableCell>
+                    </TableRow>
+                  </React.Fragment>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+
+          <TablePagination
+            rowsPerPageOptions={[5, 10, 25]}
+            component="div"
+            count={filteredProperties.length}
+            rowsPerPage={rowsPerPage}
+            page={page}
+            onPageChange={(event, newPage) => setPage(newPage)}
+            onRowsPerPageChange={(event) => {
+              setRowsPerPage(parseInt(event.target.value, 10));
+              setPage(0);
+            }}
+          />
+        </CardContent>
+      </Card>
+
+      {/* Deactivate dialog */}
+      <Dialog open={confirmDialog.open} onClose={() => setConfirmDialog({ ...confirmDialog, open: false })}>
+        <DialogTitle>{confirmDialog.isActive ? 'Confirm Deactivation' : 'Confirm Activation'}</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {confirmDialog.isActive
+              ? 'Are you sure you want to deactivate this property?'
+              : 'Activate this property?'}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDialog({ ...confirmDialog, open: false })}>Cancel</Button>
+          <Button
+            onClick={() => proceedToggle(confirmDialog.id, confirmDialog.isActive)}
+            color={confirmDialog.isActive ? 'error' : 'primary'}
+            variant="contained"
+          >
+            {confirmDialog.isActive ? 'Deactivate' : 'Activate'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Add/Edit dialog */}
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        maxWidth="md"
+        fullWidth
+        TransitionComponent={Transition}
+        keepMounted
+        PaperProps={{ sx: {
+          borderRadius: 4,
+          p: 3,
+          backgroundColor: '#fafafa',
+          boxShadow: 10,
+          overflowY: 'auto'
+        } }}
+      >
+        <DialogTitle sx={{ fontWeight: 'bold' }}>{isEditMode ? 'Edit Property' : 'Add Property'}</DialogTitle>
+        <DialogContent>
+          <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
+            {steps.map((label, index) => (
+              <Step key={label}>
+                <StepLabel
+                  StepIconProps={{
+                    sx: { color: activeStep === index ? '#00b16a' : 'rgba(0, 0, 0, 0.38)' }
+                  }}
+                >
+                  {label}
+                </StepLabel>
+              </Step>
+            ))}
+          </Stepper>
+          {renderStepContent(activeStep)}
+        </DialogContent>
+        <DialogActions>
+          {activeStep > 0 && <Button onClick={handleBack} disabled={!canEdit}>Back</Button>}
+          <Button variant="contained" onClick={handleNext} disabled={!isStepValid() || uploading || !canEdit}>
+            {activeStep === steps.length - 1 ? (isEditMode ? 'Update' : 'Save') : 'Next'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Snackbar */}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={4000}
+        onClose={() => setSnackbar({ ...snackbar, open: false })}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'end' }}
+      >
+        <Alert onClose={() => setSnackbar({ ...snackbar, open: false })} severity={snackbar.severity} variant="filled">
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
+    </div>
+  );
+}

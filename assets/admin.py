@@ -1,44 +1,58 @@
 from django.contrib import admin
 from .models import Asset, AssetServiceDue, AssetDocument
 
+
 class AssetServiceDueInline(admin.TabularInline):
     model = AssetServiceDue
     extra = 1
     show_change_link = True
+
 
 class AssetDocumentInline(admin.TabularInline):
     model = AssetDocument
     extra = 1
     show_change_link = True
 
+
 @admin.register(Asset)
 class AssetAdmin(admin.ModelAdmin):
     list_display = (
-        'name', 'company', 'property', 'project', 'category',
+        'name', 'company', 'property', 'project', 'entity', 'category',
         'purchase_date', 'purchase_price', 'warranty_expiry', 'location', 'is_active'
     )
     list_filter = ('company', 'category', 'purchase_date', 'warranty_expiry', 'is_active')
-    search_fields = ('name', 'category', 'location', 'company_name', 'projectname', 'property_name')
+    search_fields = (
+        'name', 'category', 'location',
+        'company_name', 'projectname', 'propertyname', 'entity_name'
+    )
+    list_select_related = ('company', 'property', 'project', 'entity')
     inlines = [AssetServiceDueInline, AssetDocumentInline]
     readonly_fields = ('created_at',)
     fieldsets = (
         (None, {
             'fields': (
-                'name', 'company', 'project', 'property', 'category',
+                'name', 'company', 'project', 'property', 'entity', 'category',
                 'purchase_date', 'purchase_price', 'warranty_expiry',
-                'location', 'maintenance_frequency', 'notes', 'is_active', 'created_at'
+                'location', 'maintenance_frequency', 'notes', 'is_active', 'created_at', 'tag_id'
             )
         }),
     )
+    autocomplete_fields = ('company', 'property', 'project', 'entity')
+
 
 @admin.register(AssetServiceDue)
 class AssetServiceDueAdmin(admin.ModelAdmin):
     list_display = ('asset', 'due_date', 'description', 'completed', 'created_at')
     list_filter = ('completed', 'due_date')
     search_fields = ('asset__name', 'description')
+    list_select_related = ('asset', 'asset__company')
+
 
 @admin.register(AssetDocument)
 class AssetDocumentAdmin(admin.ModelAdmin):
-    list_display = ('asset', 'document', 'uploaded_at')  # 🔄 fixed 'file' ➝ 'document'
+    list_display = ('asset', 'document', 'uploaded_at')
     search_fields = ('asset__name',)
     readonly_fields = ('uploaded_at',)
+    list_select_related = ('asset', 'asset__company')
+
+

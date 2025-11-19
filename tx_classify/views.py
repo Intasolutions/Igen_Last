@@ -9,6 +9,8 @@ from rest_framework import status, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from users.permissions_matrix_guard import RoleActionPermission  # ⬅️ added
+
 from bank_uploads.models import BankTransaction
 from .models import Classification
 from .serializers import (
@@ -17,6 +19,11 @@ from .serializers import (
     ResplitRequestSerializer,       # NEW (already used)
     ReclassifyRequestSerializer,    # NEW
 )
+
+# Pre-bound permission helpers (keeps changes tiny & explicit)
+PermTxList   = RoleActionPermission.for_module("tx_classify", op="list")
+PermTxCreate = RoleActionPermission.for_module("tx_classify", op="create")
+PermTxUpdate = RoleActionPermission.for_module("tx_classify", op="update")
 
 # ---------- helpers ----------
 def _to_dec(v):
@@ -31,7 +38,7 @@ def _q2(x: Decimal) -> Decimal:
 
 # ---------- list view ----------
 class UnclassifiedListView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermTxList]
 
     def get(self, request):
         bank_account_id = request.query_params.get("bank_account_id")
@@ -128,11 +135,23 @@ class UnclassifiedListView(APIView):
                         "active_count": tx.active_count,
                         "last_classified_at": tx.last_classified_at,
 
+                        # include BOTH display names and raw IDs so the UI can "Edit"
                         "child": {
                             "classification_id": str(c.classification_id),
                             "amount": str(_q2(c.amount)),
                             "value_date": c.value_date,
                             "remarks": c.remarks or "",
+                            "parsed_margin": c.parsed_margin,
+                            "cleaned_remarks": c.cleaned_remarks,
+
+                            # raw ids for edit/reclassify payloads
+                            "transaction_type_id": c.transaction_type_id,
+                            "cost_centre_id": c.cost_centre_id,
+                            "entity_id": c.entity_id,
+                            "asset_id": c.asset_id,
+                            "contract_id": c.contract_id,
+
+                            # labels for display
                             "transaction_type": getattr(c.transaction_type, "name", None),
                             "cost_centre": getattr(c.cost_centre, "name", None),
                             "entity": getattr(c.entity, "name", None),
@@ -169,6 +188,17 @@ class UnclassifiedListView(APIView):
                     "amount": str(_q2(c.amount)),
                     "value_date": c.value_date,
                     "remarks": c.remarks or "",
+                    "parsed_margin": c.parsed_margin,
+                    "cleaned_remarks": c.cleaned_remarks,
+
+                    # raw ids for edit/reclassify payloads
+                    "transaction_type_id": c.transaction_type_id,
+                    "cost_centre_id": c.cost_centre_id,
+                    "entity_id": c.entity_id,
+                    "asset_id": c.asset_id,
+                    "contract_id": c.contract_id,
+
+                    # labels for display
                     "transaction_type": getattr(c.transaction_type, "name", None),
                     "cost_centre": getattr(c.cost_centre, "name", None),
                     "entity": getattr(c.entity, "name", None),
@@ -186,10 +216,12 @@ class UnclassifiedListView(APIView):
 # ---------- single classify ----------
 class ClassifySingleView(APIView):
     """
-    Create one ACTIVE classification (no split) **only for UNCLASSIFIED transactions**.
+    Create one ACTIVE classification (no split). 
+    # CHANGE: Previously only allowed for UNCLASSIFIED txns. Now it REPLACES any existing
+    # active classifications for the transaction (re-classify whole txn).
     Requires tx_type / cost_centre / entity due to NOT NULL constraints.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermTxCreate]
 
     def post(self, request):
         ser = ClassificationSerializer(data=request.data)
@@ -197,16 +229,6 @@ class ClassifySingleView(APIView):
 
         txn: BankTransaction = ser.validated_data["bank_transaction"]
         amount: Decimal = ser.validated_data["amount"]
-
-        # Only classify UNCLASSIFIED transactions
-        if Classification.objects.filter(
-            bank_transaction=txn,
-            is_active_classification=True
-        ).exists():
-            return Response(
-                {"detail": "This transaction is already classified or split. Only unclassified transactions can be classified."},
-                status=400,
-            )
 
         # must equal txn amount (2dp) and be positive
         expected = _q2(abs(txn.signed_amount or Decimal("0.00")))
@@ -217,6 +239,7 @@ class ClassifySingleView(APIView):
             )
 
         with transaction.atomic():
+            # Always replace existing actives for this txn before creating the new one.
             Classification.objects.filter(
                 bank_transaction=txn, is_active_classification=True
             ).update(is_active_classification=False)
@@ -243,10 +266,12 @@ class ClassifySingleView(APIView):
 # ---------- split ----------
 class SplitTransactionView(APIView):
     """
-    Split a transaction into multiple ACTIVE rows (initial split).
+    Split a transaction into multiple ACTIVE rows.
+    # CHANGE: This now acts as an "override" too — if the txn was previously
+    # classified or split, we replace existing active classifications with the new split.
     All rows must include transaction_type / cost_centre / entity.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermTxCreate]
 
     def post(self, request):
         req = SplitRequestSerializer(data=request.data)
@@ -254,16 +279,6 @@ class SplitTransactionView(APIView):
 
         txn: BankTransaction = req.validated_data["bank_transaction_id"]
         rows = req.validated_data["rows"]
-
-        # BLOCK: if already split, do not allow splitting again here
-        active_cnt = Classification.objects.filter(
-            bank_transaction=txn, is_active_classification=True
-        ).count()
-        if active_cnt > 1:
-            return Response(
-                {"detail": "This transaction is already split and cannot be split again."},
-                status=400,
-            )
 
         total = _q2(sum((r["amount"] for r in rows), Decimal("0.00")))
         expected = _q2(abs(txn.signed_amount or Decimal("0.00")))
@@ -274,7 +289,7 @@ class SplitTransactionView(APIView):
             )
 
         with transaction.atomic():
-            # audit trail: mark previous active rows inactive (can be 0 or 1 row)
+            # audit trail: mark previous active rows inactive (0..N rows)
             Classification.objects.filter(
                 bank_transaction=txn, is_active_classification=True
             ).update(is_active_classification=False)
@@ -290,7 +305,7 @@ class SplitTransactionView(APIView):
                 new_rows.append(Classification(
                     bank_transaction=txn,
                     transaction_type=r["transaction_type_id"],
-                    cost_centre=r["cost_centre_id"],  # fixed
+                    cost_centre=r["cost_centre_id"],
                     entity=r["entity_id"],
                     asset=r.get("asset_id"),
                     contract=r.get("contract_id"),
@@ -310,7 +325,7 @@ class ResplitTransactionView(APIView):
     Re-split an **active child classification** into multiple ACTIVE rows.
     Only the selected child is inactivated; other active siblings remain.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermTxUpdate]
 
     def post(self, request):
         req = ResplitRequestSerializer(data=request.data)
@@ -372,7 +387,7 @@ class ReclassifyClassificationView(APIView):
     We inactivate the existing child row and create a single new active row on the same
     bank transaction with the same amount.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermTxUpdate]
 
     def post(self, request):
         ser = ReclassifyRequestSerializer(data=request.data)

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import csv
+import re
+import hashlib
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from io import StringIO
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from django.db import transaction
 from django.db.models import Sum
@@ -71,6 +73,34 @@ DATE_FORMATS = [
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
+def _canon_text(s: Optional[str]) -> str:
+    """Match model's narration/UTR normalization (compress spaces + lowercase)."""
+    return " ".join((s or "").split()).lower()
+
+def _q2(x: Decimal | None) -> Decimal:
+    """Quantize to 2dp exactly like the model does."""
+    return (x or Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+def _dedupe_key(date, narration, signed_amount, utr):
+    """Build the same SHA256 dedupe key the model uses (with 2dp)."""
+    payload = "|".join([
+        date.isoformat(),
+        _canon_text(narration),
+        format(_q2(signed_amount), "f"),
+        _canon_text(utr),
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+_UTR_RE = re.compile(
+    r'(?:UTR|RRN|REF(?:ERENCE)?|CHQ/REF\s*NO|TRANSACTION\s*ID|UPI\s*(?:REF)?\s*NO)'
+    r'\s*[:#\-]?\s*([A-Z0-9]{8,20})',
+    re.I
+)
+
+def _extract_ref_from_narration(narr: str) -> Optional[str]:
+    m = _UTR_RE.search(narr or "")
+    return m.group(1) if m else None
+
 def _map_headers(fieldnames: List[str]) -> Dict[str, str]:
     present = {_norm(c): c for c in fieldnames or []}
     result: Dict[str, str] = {}
@@ -112,14 +142,42 @@ def _to_decimal(val: Optional[str]) -> Optional[Decimal]:
 def _balance_continuity(rows: List[dict]) -> bool:
     if not rows:
         return True
-    prev_balance = rows[0]["balance_amount"] - rows[0]["signed_amount"]
+    prev_balance = _q2(rows[0]["balance_amount"] - rows[0]["signed_amount"])
     for r in rows:
-        expected = prev_balance + r["signed_amount"]
-        if expected != r["balance_amount"]:
+        expected = _q2(prev_balance + _q2(r["signed_amount"]))
+        if expected != _q2(r["balance_amount"]):
             return False
-        prev_balance = r["balance_amount"]
+        prev_balance = _q2(r["balance_amount"])
     return True
 
+# --- New: robust continuity helpers (auto-detect asc/desc) ---
+def _check_continuity(seq: List[dict]) -> Tuple[bool, Optional[Decimal]]:
+    """
+    Returns (ok, opening_balance) for a given sequence order.
+    opening_balance is the balance BEFORE the first row in seq.
+    """
+    if not seq:
+        return True, None
+    prev_balance = _q2(seq[0]["balance_amount"] - seq[0]["signed_amount"])
+    for r in seq:
+        expected = _q2(prev_balance + _q2(r["signed_amount"]))
+        if expected != _q2(r["balance_amount"]):
+            return False, None
+        prev_balance = _q2(r["balance_amount"])
+    return True, _q2(seq[0]["balance_amount"] - seq[0]["signed_amount"])
+
+def _continuity_and_opening(rows: List[dict]) -> Tuple[bool, Optional[Decimal], List[dict]]:
+    """
+    Try continuity in the given order; if it fails, try the reverse.
+    Returns (ok, opening_balance, used_order_rows)
+    """
+    ok, opening = _check_continuity(rows)
+    if ok:
+        return True, opening, rows
+    ok2, opening2 = _check_continuity(list(reversed(rows)))
+    if ok2:
+        return True, opening2, list(reversed(rows))
+    return False, None, rows
 
 # ---------- Endpoints ----------
 
@@ -225,6 +283,7 @@ class UploadBankTransactionsView(APIView):
                     signed = Decimal("0") - debit
                 else:
                     signed = Decimal("0")
+                signed = _q2(signed)  # <-- important: match model
 
                 parsed_rows.append({
                     "transaction_date": transaction_date,
@@ -238,11 +297,10 @@ class UploadBankTransactionsView(APIView):
             except Exception:
                 errors += 1  # skip bad rows
 
-        # Balance continuity & previous ending balance checks
-        balance_continuity_in_file = _balance_continuity(parsed_rows)
-        previous_ending_balance_match = True
-        if parsed_rows:
-            first_row_opening = parsed_rows[0]["balance_amount"] - parsed_rows[0]["signed_amount"]
+        # --- Continuity checks (MUST pass) ---
+        continuity_ok, opening_balance, used_rows = _continuity_and_opening(parsed_rows)
+        prev_match = True
+        if used_rows:
             prev_tx = (
                 BankTransaction.objects
                 .filter(bank_account_id=bank_account_id)
@@ -250,14 +308,81 @@ class UploadBankTransactionsView(APIView):
                 .first()
             )
             if prev_tx:
-                previous_ending_balance_match = (prev_tx.balance_amount == first_row_opening)
+                prev_match = (_q2(prev_tx.balance_amount) == _q2(opening_balance or Decimal("0")))
 
-        batch.balance_continuity_in_file = balance_continuity_in_file
-        batch.previous_ending_balance_match = previous_ending_balance_match
+        batch.balance_continuity_in_file = bool(continuity_ok)
+        batch.previous_ending_balance_match = bool(prev_match)
 
-        # Insert rows with DB-level dedupe enforcement
+        # HARD STOP if continuity fails
+        if not (continuity_ok and prev_match):
+            batch.uploaded_count = 0
+            batch.skipped_count = 0
+            batch.errors_count = errors + 1  # count the continuity failure
+            batch.save(update_fields=[
+                "uploaded_count", "skipped_count", "errors_count",
+                "balance_continuity_in_file", "previous_ending_balance_match",
+            ])
+
+            reason = []
+            if not continuity_ok:
+                reason.append("Balance continuity failed within the file.")
+            if not prev_match:
+                reason.append("Previous ending balance does not match this file's opening balance.")
+
+            payload = BankUploadBatchSerializer(batch).data
+            payload.update({
+                "upload_batch_id": str(batch.id),
+                "uploaded": 0,
+                "skipped_duplicates": 0,
+                "balance_continuity": "Invalid",
+                "opening_balance_in_file": str(opening_balance) if opening_balance is not None else None,
+                "errors": reason,
+            })
+            return Response(payload, status=status.HTTP_400_BAD_REQUEST)
+
+        # ---------- Pre-filter duplicates (DB + within-file) ----------
+        candidates = []
+        all_keys = set()
+        for idx, r in enumerate(used_rows, start=2):  # use validated order
+            # prefer explicit UTR, else try to extract from narration
+            best_utr = (r["utr_number"] or _extract_ref_from_narration(r["narration"]) or "").strip()
+            k_main  = _dedupe_key(r["transaction_date"], r["narration"], r["signed_amount"], best_utr)
+            k_empty = _dedupe_key(r["transaction_date"], r["narration"], r["signed_amount"], "")
+            candidates.append((idx, r, best_utr, {k_main, k_empty}))
+            all_keys |= {k_main, k_empty}
+
+        # Existing active keys for this account
+        existing_keys = set(
+            BankTransaction.objects.filter(
+                bank_account_id=bank_account_id,
+                dedupe_key__in=list(all_keys)
+            ).values_list("dedupe_key", flat=True)
+        )
+
+        kept_rows: List[tuple] = []
+        skipped_rows: List[dict] = []
+        seen_in_file = set()
+
+        for rownum, r, best_utr, keys in candidates:
+            # skip if present in DB or duplicated inside this file
+            if (keys & existing_keys) or (keys & seen_in_file):
+                skipped_rows.append({
+                    "row": rownum,
+                    "error": "Duplicate",
+                    "transaction_date": str(r["transaction_date"]),
+                    "narration": r["narration"],
+                    "credit_amount": str(r["credit_amount"]or ""),
+                    "debit_amount": str(r["debit_amount"] or ""),
+                    "balance_amount": str(r["balance_amount"]),
+                    "utr_number": best_utr or "",
+                })
+                continue
+            kept_rows.append((r, best_utr))
+            seen_in_file |= keys
+
+        # Build objects only for non-duplicates
         objs: List[BankTransaction] = []
-        for r in parsed_rows:
+        for r, best_utr in kept_rows:
             objs.append(BankTransaction(
                 bank_account_id=bank_account_id,
                 upload_batch=batch,
@@ -266,8 +391,8 @@ class UploadBankTransactionsView(APIView):
                 credit_amount=r["credit_amount"],
                 debit_amount=r["debit_amount"],
                 balance_amount=r["balance_amount"],
-                utr_number=r["utr_number"],
-                signed_amount=r["signed_amount"],  # recomputed in save, but we set it for bulk_create
+                utr_number=(best_utr or None),
+                signed_amount=r["signed_amount"],  # recomputed in save, but set here for consistency
                 source="BANK",
             ))
 
@@ -281,7 +406,10 @@ class UploadBankTransactionsView(APIView):
                 objs, ignore_conflicts=True, batch_size=1000
             )
             created = len(inserted)
-            skipped = max(0, len(objs) - created)
+            # include any extra conflicts caught by DB (very rare but possible in races)
+            db_conflict_skipped = max(0, len(objs) - created)
+            prefilter_skipped = len(used_rows) - len(kept_rows)
+            skipped = prefilter_skipped + db_conflict_skipped
 
             batch.uploaded_count = created
             batch.skipped_count = skipped
@@ -296,7 +424,8 @@ class UploadBankTransactionsView(APIView):
         payload["upload_batch_id"] = str(batch.id)
         payload["uploaded"] = created
         payload["skipped_duplicates"] = skipped
-        payload["balance_continuity"] = "Valid" if balance_continuity_in_file else "Invalid"
+        payload["skipped_rows"] = skipped_rows
+        payload["balance_continuity"] = "Valid"
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -359,8 +488,11 @@ class RecentUploadsView(APIView):
 
         rows = []
         for b in qs:
-            status_txt = "Passed" if (b.balance_continuity_in_file and b.previous_ending_balance_match and b.errors_count == 0) \
-                         else "Needs Review"
+            status_txt = "Passed" if (
+                b.balance_continuity_in_file
+                and b.previous_ending_balance_match
+                and b.errors_count == 0
+            ) else "Needs Review"
             rows.append({
                 "batch_id": str(b.id),
                 "upload_date": b.created_at.strftime("%Y-%m-%d %H:%M"),

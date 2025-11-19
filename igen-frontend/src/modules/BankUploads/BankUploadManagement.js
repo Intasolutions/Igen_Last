@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box, Typography, Button, MenuItem, Select, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
@@ -8,12 +7,64 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import API from '../../api/axios';
 import FileUploader from '../../components/FileUploader';
-import { styled } from '@mui/material/styles';
 
 const LOCAL_BATCH_KEY = 'last_upload_batch_id';
 const LOCAL_ACCOUNT_KEY = 'last_selected_bank_account';
 
-const SummaryItem = ({ label, value, intent }) => (
+// ---- simple role/permission gate ----
+const isCenterHeadRole = (role) => {
+  if (!role) return false;
+  const r = String(role).toLowerCase().trim();
+  return ['center head', 'center_head', 'centerhead', 'centre head', 'centre_head'].includes(r);
+};
+
+const userCanUpload = () => {
+  try {
+    // Try a few common keys used in apps to store the signed-in user
+    const raw =
+      localStorage.getItem('user') ||
+      localStorage.getItem('auth_user') ||
+      localStorage.getItem('profile') ||
+      localStorage.getItem('auth');
+    if (!raw) return true; // default allow unless we identify Center Head
+    const u = JSON.parse(raw);
+
+    // Extract role in a robust way
+    const role =
+      u?.role ??
+      u?.user_role ??
+      u?.user?.role ??
+      u?.profile?.role ??
+      u?.data?.role;
+
+    // Center Head should not upload unless explicit permission is present
+    const disallow = isCenterHeadRole(role);
+
+    // If your backend sends fine-grained permissions, allowlist specific scopes to override
+    const perms =
+      (Array.isArray(u?.permissions) && u.permissions) ||
+      (Array.isArray(u?.perms) && u.perms) ||
+      (Array.isArray(u?.scopes) && u.scopes) ||
+      [];
+
+    const hasExplicitUploadPermission = perms.some((p) =>
+      [
+        'bank_uploads.upload',
+        'bank_uploads:create',
+        'bank:uploads:create',
+        'bank_upload:upload',
+        'uploads.bank.create',
+      ].includes(String(p).toLowerCase())
+    );
+
+    if (disallow && !hasExplicitUploadPermission) return false;
+    return true;
+  } catch {
+    return true; // fail open (non-Center Head) if we can’t parse
+  }
+};
+
+const SummaryItem = ({ label, value, intent, sx }) => (
   <Chip
     label={`${label}: ${value}`}
     color={intent === 'good' ? 'success' : intent === 'bad' ? 'error' : 'default'}
@@ -22,7 +73,8 @@ const SummaryItem = ({ label, value, intent }) => (
       fontWeight: 500,
       borderRadius: '8px',
       height: '32px',
-      '& .MuiChip-label': { fontSize: '0.9rem' }
+      '& .MuiChip-label': { fontSize: '0.9rem' },
+      ...sx,
     }}
   />
 );
@@ -31,6 +83,15 @@ const SummaryItem = ({ label, value, intent }) => (
 const fmtMoney = (v) => {
   if (v === null || v === undefined || v === '' || isNaN(Number(v))) return '-';
   return Number(v).toLocaleString('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+// Centralized error handling
+const handleApiError = (err, defaultMessage) => {
+  const message = err?.response?.data?.error || err?.response?.data?.detail || defaultMessage;
+  if (process.env.NODE_ENV === 'development') {
+    console.error('API Error:', err);
+  }
+  return message;
 };
 
 const BankUploadManagement = () => {
@@ -51,6 +112,13 @@ const BankUploadManagement = () => {
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [openDialog, setOpenDialog] = useState(false);
+  const [viewLoading, setViewLoading] = useState(null);
+
+  // permission flag (no layout changes; we just hide/disable actions)
+  const [canUpload, setCanUpload] = useState(true);
+  useEffect(() => {
+    setCanUpload(userCanUpload());
+  }, []);
 
   // ---------------- helpers ----------------
   const resetTables = () => {
@@ -80,7 +148,7 @@ const BankUploadManagement = () => {
         }));
       }
     } catch (err) {
-      setError(err?.response?.data?.error || err?.response?.data?.detail || 'Could not fetch previous upload summary.');
+      setError(handleApiError(err, 'Could not fetch previous upload summary.'));
       setResponse(null);
       resetTables();
     } finally {
@@ -97,8 +165,8 @@ const BankUploadManagement = () => {
         if (Array.isArray(res.data)) {
           setBankAccounts(res.data);
           const savedAccount = localStorage.getItem(LOCAL_ACCOUNT_KEY);
-          if (savedAccount && res.data.some(account => account.id === savedAccount)) {
-            setSelectedBankAccount(savedAccount);
+          if (savedAccount && res.data.some(account => String(account.id) === String(savedAccount))) {
+            setSelectedBankAccount(String(savedAccount));
           } else {
             localStorage.removeItem(LOCAL_ACCOUNT_KEY);
           }
@@ -106,7 +174,7 @@ const BankUploadManagement = () => {
           setBankAccountError('Unexpected response format for bank accounts.');
         }
       } catch (err) {
-        setBankAccountError(err?.response?.data?.detail || 'Failed to fetch bank accounts. Please try again.');
+        setBankAccountError(handleApiError(err, 'Failed to fetch bank accounts. Please try again.'));
       }
     };
     fetchBankAccounts();
@@ -115,9 +183,13 @@ const BankUploadManagement = () => {
   useEffect(() => {
     const savedAccount = localStorage.getItem(LOCAL_ACCOUNT_KEY);
     const savedBatchId = localStorage.getItem(LOCAL_BATCH_KEY);
-    if (savedAccount && bankAccounts.some(account => account.id === savedAccount)) {
-      setSelectedBankAccount(savedAccount);
-      if (savedBatchId) fetchBatchSummary(savedBatchId, true);
+    if (savedAccount && bankAccounts.some(account => String(account.id) === String(savedAccount))) {
+      setSelectedBankAccount(String(savedAccount));
+      if (savedBatchId && /^[0-9a-fA-F-]+$/.test(savedBatchId)) {
+        fetchBatchSummary(savedBatchId, true);
+      } else {
+        localStorage.removeItem(LOCAL_BATCH_KEY);
+      }
     }
   }, [bankAccounts]);
 
@@ -141,7 +213,7 @@ const BankUploadManagement = () => {
         setRecentUploads([]);
         resetTables();
         setResponse(null);
-        setError('Failed to fetch recent uploads.');
+        setError(handleApiError(err, 'Failed to fetch recent uploads.'));
       } finally {
         setLoadingTable(false);
       }
@@ -170,8 +242,9 @@ const BankUploadManagement = () => {
     }
     const f = files[0];
     const name = f?.name?.toLowerCase() || '';
-    const ok = name.endsWith('.csv') || f?.type === 'text/csv';
-    if (f && ok) {
+    const okExt = name.endsWith('.csv');
+    const okType = ['text/csv', 'application/vnd.ms-excel', 'application/csv', 'text/plain'].includes(f?.type);
+    if (f && (okExt || okType)) {
       setFile([f]);
       setError(null);
       setSnackbar({ open: true, message: `File selected: ${f.name}`, severity: 'info' });
@@ -183,12 +256,16 @@ const BankUploadManagement = () => {
   };
 
   const handleUpload = async () => {
+    if (!canUpload) {
+      setSnackbar({ open: true, message: "You don't have permission to upload files.", severity: 'error' });
+      return;
+    }
     if (!selectedBankAccount) {
       setError('Please select a bank account.');
       setSnackbar({ open: true, message: 'Please select a bank account.', severity: 'error' });
       return;
     }
-    if (!file?.length) {
+    if (!file || file.length === 0) {
       setError('Please upload a CSV file.');
       setSnackbar({ open: true, message: 'Please upload a CSV file.', severity: 'error' });
       return;
@@ -221,10 +298,17 @@ const BankUploadManagement = () => {
         } catch {}
       }
     } catch (err) {
-      let message = err?.response?.data?.error || err?.response?.data?.detail || 'Upload failed.';
-      if (err?.response?.data?.details) message += ': ' + err.response.data.details.join(' | ');
+      let message = handleApiError(err, 'Upload failed.');
+      const errData = err?.response?.data;
+      if (Array.isArray(errData?.errors)) {
+        message = errData.errors
+          .map(e => (typeof e === 'string' ? e : (e.error || JSON.stringify(e.errors) || 'Validation error')))
+          .join(' | ');
+      } else if (errData?.details) {
+        message += ': ' + errData.details.join(' | ');
+      }
       setError(message);
-      setResponse({ errors: err?.response?.data?.errors || [], ...err?.response?.data });
+      setResponse({ errors: Array.isArray(errData?.errors) ? errData.errors : [], ...errData });
       setSnackbar({ open: true, message: message, severity: 'error' });
     } finally {
       setUploading(false);
@@ -232,6 +316,10 @@ const BankUploadManagement = () => {
   };
 
   const handleOpenDialog = () => {
+    if (!canUpload) {
+      setSnackbar({ open: true, message: "You don't have permission to upload files.", severity: 'error' });
+      return;
+    }
     setOpenDialog(true);
     setFile([]);
     setError(null);
@@ -241,6 +329,17 @@ const BankUploadManagement = () => {
     setOpenDialog(false);
     setFile([]);
     setError(null);
+  };
+
+  const handleViewClick = async (batchId) => {
+    setViewLoading(batchId);
+    try {
+      localStorage.setItem(LOCAL_BATCH_KEY, batchId);
+      localStorage.setItem(LOCAL_ACCOUNT_KEY, selectedBankAccount);
+      await fetchBatchSummary(batchId);
+    } finally {
+      setViewLoading(null);
+    }
   };
 
   // ---------------- filtering/pagination ----------------
@@ -264,6 +363,9 @@ const BankUploadManagement = () => {
   }, [uploadedTransactions, searchTerm, typeFilter]);
 
   const paginatedTransactions = useMemo(() => {
+    if (rowsPerPage === -1) {
+      return filteredTransactions;
+    }
     const start = page * rowsPerPage;
     return filteredTransactions.slice(start, start + rowsPerPage);
   }, [filteredTransactions, page, rowsPerPage]);
@@ -282,6 +384,7 @@ const BankUploadManagement = () => {
               onChange={handleBankAccountChange}
               displayEmpty
               size="medium"
+              aria-label="Select bank account"
               sx={{
                 minWidth: 200,
                 borderRadius: 2,
@@ -297,31 +400,36 @@ const BankUploadManagement = () => {
                 {bankAccounts.length === 0 ? 'No Bank Accounts Available' : 'Select Bank Account'}
               </MenuItem>
               {bankAccounts.map((a) => (
-                <MenuItem key={a.id} value={a.id}>
+                <MenuItem key={a.id} value={String(a.id)}>
                   {a.bank_name} - {a.account_number}
                 </MenuItem>
               ))}
             </Select>
           </Tooltip>
-          <Button
-            variant="contained"
-            onClick={handleOpenDialog}
-            disabled={uploading || !selectedBankAccount}
-            sx={{
-              borderRadius: 2,
-              px: 4,
-              py: 1.5,
-              background: 'linear-gradient(45deg, #1976d2 30%, #2196f3 90%)',
-              '&:hover': { background: 'linear-gradient(45deg, #1565c0 30%, #1976d2 90%)' },
-              '&:disabled': { background: 'grey.400' }
-            }}
-          >
-            Upload File
-          </Button>
+
+          {/* Upload button hidden for Center Head (no layout change elsewhere) */}
+          {canUpload && (
+            <Button
+              variant="contained"
+              onClick={handleOpenDialog}
+              disabled={uploading || !selectedBankAccount}
+              aria-label="Upload bank transactions file"
+              sx={{
+                borderRadius: 2,
+                px: 4,
+                py: 1.5,
+                background: 'linear-gradient(45deg, #1976d2 30%, #2196f3 90%)',
+                '&:hover': { background: 'linear-gradient(45deg, #1565c0 30%, #1976d2 90%)' },
+                '&:disabled': { background: 'grey.400' }
+              }}
+            >
+              Upload File
+            </Button>
+          )}
         </Box>
       </Box>
 
-      {/* Upload Dialog */}
+      {/* Upload Dialog (guarded) */}
       <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
         <DialogTitle>Upload Bank Transactions</DialogTitle>
         <DialogContent>
@@ -344,11 +452,12 @@ const BankUploadManagement = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseDialog} disabled={uploading}>Cancel</Button>
+          <Button onClick={handleCloseDialog} disabled={uploading} aria-label="Cancel upload">Cancel</Button>
           <Button
             variant="contained"
             onClick={handleUpload}
-            disabled={uploading || !file?.length}
+            disabled={!canUpload || uploading || !file?.length}
+            aria-label="Upload CSV file"
             sx={{
               borderRadius: 2,
               background: 'linear-gradient(45deg, #1976d2 30%, #2196f3 90%)',
@@ -368,24 +477,24 @@ const BankUploadManagement = () => {
         </Alert>
       )}
 
-      {/* Row Errors */}
+      {/* Row Errors / Validation Errors */}
       {response?.errors?.length > 0 && (
-        <Card sx={{ 
-          mb: 3, 
-          p: 3, 
-          borderRadius: 4, 
-          boxShadow: '0 8px 24px rgba(0,0,0,0.08)', 
-          background: 'linear-gradient(145deg, #ffffff, #f8fafc)', 
+        <Card sx={{
+          mb: 3,
+          p: 3,
+          borderRadius: 4,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+          background: 'linear-gradient(145deg, #ffffff, #f8fafc)',
           border: '1px solid rgba(0,0,0,0.05)',
           transition: 'transform 0.3s ease, box-shadow 0.3s ease',
           '&:hover': { transform: 'translateY(-4px)', boxShadow: '0 12px 32px rgba(0,0,0,0.12)' }
         }}>
           <CardContent>
-            <Typography 
-              variant="h6" 
-              sx={{ 
-                mb: 2, 
-                fontWeight: 600, 
+            <Typography
+              variant="h6"
+              sx={{
+                mb: 2,
+                fontWeight: 600,
                 color: 'error.main',
                 display: 'flex',
                 alignItems: 'center',
@@ -401,15 +510,17 @@ const BankUploadManagement = () => {
             <Box component="ul" sx={{ pl: 3, m: 0, maxHeight: 200, overflowY: 'auto', '&::-webkit-scrollbar': { width: 6 }, '&::-webkit-scrollbar-thumb': { backgroundColor: 'grey.300', borderRadius: 3 } }}>
               {response.errors.map((err, idx) => (
                 <li key={idx}>
-                  <Typography 
-                    variant="body2" 
-                    sx={{ 
-                      py: 1, 
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      py: 1,
                       color: 'text.secondary',
                       '&:hover': { color: 'text.primary', bgcolor: 'grey.100', borderRadius: 2, px: 1, transition: 'all 0.2s ease' }
                     }}
                   >
-                    Row {err.row}: {err.error || JSON.stringify(err.errors)}
+                    {typeof err === 'string'
+                      ? err
+                      : `Row ${err.row}: ${err.error || JSON.stringify(err.errors)}`}
                   </Typography>
                 </li>
               ))}
@@ -420,22 +531,22 @@ const BankUploadManagement = () => {
 
       {/* Validation & Upload Summary */}
       {response && (
-        <Card sx={{ 
-          mb: 3, 
-          p: 3, 
-          borderRadius: 4, 
-          boxShadow: '0 8px 24px rgba(0,0,0,0.08)', 
-          background: 'linear-gradient(145deg, #ffffff, #f5f7fa)', 
+        <Card sx={{
+          mb: 3,
+          p: 3,
+          borderRadius: 4,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+          background: 'linear-gradient(145deg, #ffffff, #f5f7fa)',
           border: '1px solid rgba(0,0,0,0.05)',
           transition: 'transform 0.3s ease, box-shadow 0.3s ease',
           '&:hover': { transform: 'translateY(-4px)', boxShadow: '0 12px 32px rgba(0,0,0,0.12)' }
         }}>
           <CardContent>
-            <Typography 
-              variant="h6" 
-              sx={{ 
-                mb: 2, 
-                fontWeight: 600, 
+            <Typography
+              variant="h6"
+              sx={{
+                mb: 2,
+                fontWeight: 600,
                 color: 'primary.main',
                 display: 'flex',
                 alignItems: 'center',
@@ -447,13 +558,13 @@ const BankUploadManagement = () => {
               </svg>
               Upload Summary
             </Typography>
-            <Stack 
-              direction={{ xs: 'column', sm: 'row' }} 
-              spacing={2} 
-              flexWrap="wrap" 
-              sx={{ 
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={2}
+              flexWrap="wrap"
+              sx={{
                 gap: 1.5,
-                '& > *': { 
+                '& > *': {
                   transition: 'transform 0.2s ease',
                   '&:hover': { transform: 'scale(1.05)' }
                 }
@@ -480,7 +591,7 @@ const BankUploadManagement = () => {
                 intent={response.previous_ending_balance_match === true ? 'good' : (response.previous_ending_balance_match === false ? 'bad' : undefined)}
                 sx={{
                   bgcolor: response.previous_ending_balance_match === true ? 'success.light' : response.previous_ending_balance_match === false ? 'error.light' : 'grey.100',
-                  color: response.previous_ending_balance_match === true ? 'success.contrastText' : response.previous_ending_balance_match === false ? 'error.contrastText' : 'text.primary',
+                  color: response.previous_ending_balance_match === true ? 'success.contrastText' : 'response.previous_ending_balance_match === false' ? 'error.contrastText' : 'text.primary',
                   borderRadius: '12px',
                   fontWeight: 500,
                   px: 2,
@@ -489,13 +600,11 @@ const BankUploadManagement = () => {
               />
               <SummaryItem
                 label="Duplicate Rows Found"
-                value={typeof response.duplicate_rows_found === 'boolean'
-                  ? (response.duplicate_rows_found ? 'Yes' : 'No')
-                  : (response.skipped_duplicates > 0 ? 'Yes' : 'No')}
-                intent={(response.duplicate_rows_found || response.skipped_duplicates > 0) ? 'bad' : 'good'}
+                value={response.skipped_duplicates > 0 ? 'Yes' : 'No'}
+                intent={response.skipped_duplicates > 0 ? 'bad' : 'good'}
                 sx={{
-                  bgcolor: (response.duplicate_rows_found || response.skipped_duplicates > 0) ? 'error.light' : 'success.light',
-                  color: (response.duplicate_rows_found || response.skipped_duplicates > 0) ? 'error.contrastText' : 'success.contrastText',
+                  bgcolor: response.skipped_duplicates > 0 ? 'error.light' : 'success.light',
+                  color: response.skipped_duplicates > 0 ? 'error.contrastText' : 'success.contrastText',
                   borderRadius: '12px',
                   fontWeight: 500,
                   px: 2,
@@ -533,32 +642,32 @@ const BankUploadManagement = () => {
       )}
 
       {(batchTotals.total_credit !== 0 || batchTotals.total_debit !== 0 || batchTotals.final_balance !== 0) && (
-        <Card sx={{ 
-          mb: 3, 
-          p: 3, 
-          borderRadius: 3, 
-          boxShadow: '0 4px 16px rgba(0,0,0,0.06)', 
-          background: 'linear-gradient(180deg, #ffffff 0%, #f9fafb 100%)', 
+        <Card sx={{
+          mb: 3,
+          p: 3,
+          borderRadius: 3,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
+          background: 'linear-gradient(180deg, #ffffff 0%, #f9fafb 100%)',
           border: '1px solid rgba(0,0,0,0.03)',
           overflow: 'hidden',
           transition: 'all 0.3s ease-in-out',
-          '&:hover': { 
-            boxShadow: '0 6px 20px rgba(0,0,0,0.1)', 
-            transform: 'translateY(-2px)' 
+          '&:hover': {
+            boxShadow: '0 6px 20px rgba(0,0,0,0.1)',
+            transform: 'translateY(-2px)'
           }
         }}>
           <CardContent sx={{ p: 0 }}>
-            <Typography 
-              variant="h6" 
-              sx={{ 
-                mb: 2.5, 
+            <Typography
+              variant="h6"
+              sx={{
+                mb: 2.5,
                 px: 2,
-                fontWeight: 700, 
+                fontWeight: 700,
                 color: '#1a1a1a',
                 letterSpacing: '-0.02em',
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: 1.5 
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5
               }}
             >
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -566,21 +675,21 @@ const BankUploadManagement = () => {
               </svg>
               Batch Totals
             </Typography>
-            <Stack 
-              direction={{ xs: 'column', sm: 'row' }} 
-              spacing={2} 
-              sx={{ 
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={2}
+              sx={{
                 px: 2,
-                '& > *': { 
-                  flex: 1, 
-                  py: 2, 
+                '& > *': {
+                  flex: 1,
+                  py: 2,
                   px: 2.5,
-                  borderRadius: 2, 
-                  bgcolor: 'rgba(255,255,255,0.9)', 
+                  borderRadius: 2,
+                  bgcolor: 'rgba(255,255,255,0.9)',
                   border: '1px solid rgba(0,0,0,0.05)',
                   transition: 'all 0.2s ease',
-                  '&:hover': { 
-                    bgcolor: 'primary.light', 
+                  '&:hover': {
+                    bgcolor: 'primary.light',
                     color: 'primary.contrastText',
                     transform: 'translateY(-1px)',
                     boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
@@ -588,42 +697,21 @@ const BankUploadManagement = () => {
                 }
               }}
             >
-              <Typography 
-                variant="subtitle1" 
-                sx={{ 
-                  fontWeight: 600, 
-                  color: '#2e7d32', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: 1,
-                  fontSize: '1.1rem'
-                }}
+              <Typography
+                variant="subtitle1"
+                sx={{ fontWeight: 600, color: '#2e7d32', display: 'flex', alignItems: 'center', gap: 1, fontSize: '1.1rem' }}
               >
                 Total Credit: {fmtMoney(batchTotals.total_credit)}
               </Typography>
-              <Typography 
-                variant="subtitle1" 
-                sx={{ 
-                  fontWeight: 600, 
-                  color: '#d32f2f', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: 1,
-                  fontSize: '1.1rem'
-                }}
+              <Typography
+                variant="subtitle1"
+                sx={{ fontWeight: 600, color: '#d32f2f', display: 'flex', alignItems: 'center', gap: 1, fontSize: '1.1rem' }}
               >
                 Total Debit: {fmtMoney(batchTotals.total_debit)}
               </Typography>
-              <Typography 
-                variant="subtitle1" 
-                sx={{ 
-                  fontWeight: 600, 
-                  color: '#1976d2', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: 1,
-                  fontSize: '1.1rem'
-                }}
+              <Typography
+                variant="subtitle1"
+                sx={{ fontWeight: 600, color: '#1976d2', display: 'flex', alignItems: 'center', gap: 1, fontSize: '1.1rem' }}
               >
                 Final Balance: {fmtMoney(batchTotals.final_balance)}
               </Typography>
@@ -634,10 +722,10 @@ const BankUploadManagement = () => {
       <Divider sx={{ my: 3 }} />
 
       {/* Transactions Table */}
-      <Card sx={{ 
-        mb: 3, 
-        borderRadius: 4, 
-        boxShadow: '0 4px 16px rgba(0,0,0,0.06)', 
+      <Card sx={{
+        mb: 3,
+        borderRadius: 4,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
         background: '#ffffff',
         border: '1px solid rgba(0,0,0,0.03)',
         transition: 'all 0.3s ease',
@@ -645,11 +733,11 @@ const BankUploadManagement = () => {
       }}>
         <CardContent sx={{ p: 3 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-            <Typography 
-              variant="h6" 
-              sx={{ 
-                fontWeight: 600, 
-                color: '#1a1a1a', 
+            <Typography
+              variant="h6"
+              sx={{
+                fontWeight: 600,
+                color: '#1a1a1a',
                 letterSpacing: '-0.02em',
                 display: 'flex',
                 alignItems: 'center',
@@ -661,12 +749,12 @@ const BankUploadManagement = () => {
               </svg>
               Uploaded Transactions
             </Typography>
-            <Box sx={{ 
-              display: 'flex', 
-              gap: 2, 
-              alignItems: 'center', 
+            <Box sx={{
+              display: 'flex',
+              gap: 2,
+              alignItems: 'center',
               flexWrap: 'wrap',
-              '& > *': { 
+              '& > *': {
                 transition: 'all 0.2s ease',
                 '&:focus-within': { transform: 'translateY(-2px)', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }
               }
@@ -693,13 +781,14 @@ const BankUploadManagement = () => {
                     height: 40,
                   }
                 }}
-                sx={{ 
-                  width: { xs: '100%', sm: 320 }, 
-                  '& .MuiInputBase-root': { 
+                sx={{
+                  width: { xs: '100%', sm: 320 },
+                  '& .MuiInputBase-root': {
                     pr: 1,
                     '& input': { py: 1.2 }
                   }
                 }}
+                aria-label="Search transactions"
               />
               <Select
                 size="small"
@@ -716,6 +805,7 @@ const BankUploadManagement = () => {
                   height: 40,
                   '& .MuiSelect-select': { py: 1.2 }
                 }}
+                aria-label="Filter transaction type"
               >
                 <MenuItem value="ALL">
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -741,27 +831,26 @@ const BankUploadManagement = () => {
                     Debit
                   </Box>
                 </MenuItem>
-oplasia
               </Select>
             </Box>
           </Box>
-          <TableContainer sx={{ 
-            maxHeight: 400, 
-            '&::-webkit-scrollbar': { width: 6 }, 
+          <TableContainer sx={{
+            maxHeight: 400,
+            '&::-webkit-scrollbar': { width: 6 },
             '&::-webkit-scrollbar-thumb': { backgroundColor: 'grey.300', borderRadius: 3 },
             borderRadius: 2,
             bgcolor: '#fafafa'
           }}>
-            <Table size="small" stickyHeader>
+            <Table size="small" stickyHeader aria-label="Uploaded transactions table">
               <TableHead>
-                <TableRow sx={{ 
-                  '& th': { 
-                    backgroundColor: '#e3f2fd', 
+                <TableRow sx={{
+                  '& th': {
+                    backgroundColor: '#e3f2fd',
                     borderBottom: '1px solid #bbdefb',
                     fontWeight: 600,
                     color: '#1565c0',
-                    py: 1.5
-                  } 
+              py: 1.5
+                  }
                 }}>
                   <TableCell>Date</TableCell>
                   <TableCell>Narration</TableCell>
@@ -780,15 +869,15 @@ oplasia
                   </TableRow>
                 ) : paginatedTransactions.length > 0 ? (
                   paginatedTransactions.map((item, idx) => (
-                    <TableRow 
-                      key={idx} 
-                      hover 
-                      sx={{ 
-                        '&:hover': { 
-                          backgroundColor: '#e3f2fd', 
-                          transition: 'background-color 0.2s ease' 
+                    <TableRow
+                      key={idx}
+                      hover
+                      sx={{
+                        '&:hover': {
+                          backgroundColor: '#e3f2fd',
+                          transition: 'background-color 0.2s ease'
                         },
-                        '& td': { 
+                        '& td': {
                           borderBottom: '1px solid rgba(0,0,0,0.05)',
                           py: 1.2,
                           fontSize: '0.9rem'
@@ -814,22 +903,23 @@ oplasia
             </Table>
           </TableContainer>
           <TablePagination
-            rowsPerPageOptions={[5, 10, 25, 50]}
+            rowsPerPageOptions={[5, 10, 25, 50, { label: 'All', value: -1 }]}
             component="div"
             count={filteredTransactions.length}
             rowsPerPage={rowsPerPage}
             page={page}
             onPageChange={(_, p) => setPage(p)}
             onRowsPerPageChange={e => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
-            sx={{ 
-              '.MuiTablePagination-toolbar': { 
-                borderTop: '1px solid rgba(0,0,0,0.05)', 
-                bgcolor: '#fafafa', 
+            sx={{
+              '.MuiTablePagination-toolbar': {
+                borderTop: '1px solid rgba(0,0,0,0.05)',
+                bgcolor: '#fafafa',
                 color: '#424242',
                 '& .MuiSelect-select': { py: 1 },
                 '& .MuiIconButton-root': { color: '#1976d2' }
               }
             }}
+            aria-label="Uploaded transactions pagination"
           />
         </CardContent>
       </Card>
@@ -842,7 +932,7 @@ oplasia
               Skipped Duplicate Transactions
             </Typography>
             <TableContainer sx={{ maxHeight: 300, '&::-webkit-scrollbar': { display: 'none' }, '-ms-overflow-style': 'none', 'scrollbar-width': 'none' }}>
-              <Table size="small" stickyHeader>
+              <Table size="small" stickyHeader aria-label="Skipped duplicate transactions table">
                 <TableHead>
                   <TableRow sx={{ '& th': { backgroundColor: 'background.paper', borderBottom: '2px solid #e0e0e0' } }}>
                     <TableCell>Date</TableCell>
@@ -879,7 +969,7 @@ oplasia
               Recent Uploads
             </Typography>
             <TableContainer sx={{ maxHeight: 300, '&::-webkit-scrollbar': { display: 'none' }, '-ms-overflow-style': 'none', 'scrollbar-width': 'none' }}>
-              <Table size="small" stickyHeader>
+              <Table size="small" stickyHeader aria-label="Recent uploads table">
                 <TableHead>
                   <TableRow sx={{ '& th': { backgroundColor: 'background.paper', borderBottom: '2px solid #e0e0e0' } }}>
                     <TableCell>Upload Date</TableCell>
@@ -909,18 +999,18 @@ oplasia
                         />
                       </TableCell>
                       <TableCell>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => {
-                            localStorage.setItem(LOCAL_BATCH_KEY, item.batch_id);
-                            localStorage.setItem(LOCAL_ACCOUNT_KEY, selectedBankAccount);
-                            fetchBatchSummary(item.batch_id);
-                          }}
-                          sx={{ borderRadius: 2 }}
-                        >
-                          View
-                        </Button>
+                        {/passed/i.test(item.status) && (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => handleViewClick(item.batch_id)}
+                            disabled={viewLoading === item.batch_id}
+                            sx={{ borderRadius: 2 }}
+                            aria-label={`View transactions for batch ${item.batch_id}`}
+                          >
+                            {viewLoading === item.batch_id ? <CircularProgress size={20} /> : 'View'}
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   )) : (

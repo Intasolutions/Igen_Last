@@ -17,6 +17,12 @@ from rest_framework.response import Response
 from .models import TransactionLedgerCombined
 from .serializers import TransactionLedgerSerializer
 
+# Resolve entity codes like "B103" -> id (safe even if your Entity has no 'code' field)
+from entities.models import Entity
+
+# 🔐 role-action guard
+from users.permissions_matrix_guard import RoleActionPermission
+
 
 Q2 = Decimal("0.01")  # 2-decimal quantize helper
 
@@ -27,14 +33,30 @@ class ReportPagination(PageNumberPagination):
     max_page_size = 200
 
 
+def is_super(user):
+    return getattr(user, "is_superuser", False) or getattr(user, "role", None) == "SUPER_USER"
+
+
+# Bind permission for this module.
+PermReports = RoleActionPermission.bind(
+    module="reports",
+    action_map={
+        "GET": "list",  # default for list() endpoints
+    },
+)
+
+
 class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Entity-Wise Report
 
     Required query params: start_date, end_date, entity
+      - 'entity' may be the numeric PK or a unique code like 'B103'
+        (falls back to exact name match if your Entity has no 'code' field)
+
     Optional: cost_centre, transaction_type, source, min_amount, max_amount
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PermReports]
     queryset = TransactionLedgerCombined.objects.all().order_by("-date")
     serializer_class = TransactionLedgerSerializer
     pagination_class = ReportPagination
@@ -76,6 +98,40 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         except (InvalidOperation, TypeError):
             return None
 
+    def _entity_has_field(self, name: str) -> bool:
+        return any(getattr(f, "name", None) == name for f in Entity._meta.get_fields())
+
+    def _resolve_entity_id(self, raw):
+        """
+        Accept either the numeric PK or a unique entity code.
+        If your Entity model doesn't have a 'code' field, we also try an exact name match.
+        Returns an integer id or None if it can't be resolved.
+        """
+        # numeric id?
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+
+        if not raw:
+            return None
+
+        # Prefer 'code' if present on the model
+        try:
+            if self._entity_has_field("code"):
+                return Entity.objects.only("id").get(code=raw).id
+        except Entity.DoesNotExist:
+            pass
+        except Exception:
+            # Any ORM/Field error – ignore and try fallback
+            pass
+
+        # Fallback: exact name match (case-insensitive)
+        try:
+            return Entity.objects.only("id").get(name__iexact=str(raw).strip()).id
+        except Entity.DoesNotExist:
+            return None
+
     # ---- queryset ------------------------------------------------------------
 
     def get_queryset(self):
@@ -94,26 +150,40 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
         # Tenant scoping: user -> companies M2M
-        if not getattr(user, "is_superuser", False):
+        if not is_super(user):
             if not hasattr(user, "companies"):
                 return qs.none()
             company_ids = list(user.companies.values_list("id", flat=True))
             if not company_ids:
                 return qs.none()
             qs = qs.filter(company_id__in=company_ids)
+        else:
+            # Super-user may narrow by company=? query param
+            cid = self.request.query_params.get("company")
+            if cid:
+                try:
+                    qs = qs.filter(company_id=int(cid))
+                except ValueError:
+                    qs = qs.filter(company_id=-1)  # force empty if bad id
 
         # Required filters (BRD)
-        start_date, end_date, entity_id = self._required_params()
-        if not start_date or not end_date or not entity_id:
+        start_date, end_date, entity_param = self._required_params()
+        if not start_date or not end_date or not entity_param:
             self._missing = {
                 "start_date": bool(start_date),
                 "end_date": bool(end_date),
-                "entity": bool(entity_id),
+                "entity": bool(entity_param),
             }
             return qs.none()
 
         sd, ed = self._parse_dates(start_date, end_date)
         if not sd or not ed:
+            return qs.none()
+
+        # Resolve entity (id or code / or name)
+        entity_id = self._resolve_entity_id(entity_param)
+        if entity_id is None:
+            self._bad_entity = True
             return qs.none()
 
         qs = qs.filter(date__gte=sd, date__lte=ed, entity_id=entity_id)
@@ -143,11 +213,18 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         if getattr(self, "_missing", None):
             missing = [k for k, ok in self._missing.items() if not ok]
             return Response({"detail": f"Missing required filter(s): {', '.join(missing)}"}, status=400)
+        if getattr(self, "_bad_entity", False):
+            return Response({"detail": "Invalid entity parameter."}, status=400)
         return super().list(request, *args, **kwargs)
 
     # ---- summary -------------------------------------------------------------
 
-    @action(detail=False, methods=["get"], url_path="summary")
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="summary",
+        permission_classes=[permissions.IsAuthenticated, PermReports.action("summary")],
+    )
     def summary(self, request):
         if getattr(self, "_date_error", False):
             return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=400)
@@ -156,6 +233,8 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         if getattr(self, "_missing", None):
             missing = [k for k, ok in self._missing.items() if not ok]
             return Response({"detail": f"Missing required filter(s): {', '.join(missing)}"}, status=400)
+        if getattr(self, "_bad_entity", False):
+            return Response({"detail": "Invalid entity parameter."}, status=400)
 
         qs = self.filter_queryset(self.get_queryset())
 
@@ -173,7 +252,12 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
 
     # ---- export --------------------------------------------------------------
 
-    @action(detail=False, methods=["get"], url_path="export")
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="export",
+        permission_classes=[permissions.IsAuthenticated, PermReports.action("export")],
+    )
     def export(self, request):
         if getattr(self, "_date_error", False):
             return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=400)
@@ -182,6 +266,8 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         if getattr(self, "_missing", None):
             missing = [k for k, ok in self._missing.items() if not ok]
             return Response({"detail": f"Missing required filter(s): {', '.join(missing)}"}, status=400)
+        if getattr(self, "_bad_entity", False):
+            return Response({"detail": "Invalid entity parameter."}, status=400)
 
         qs = self.filter_queryset(self.get_queryset())
         if not qs.exists():

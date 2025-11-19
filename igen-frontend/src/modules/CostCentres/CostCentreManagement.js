@@ -7,23 +7,34 @@ import {
   TableContainer, TableHead, TableRow, TablePagination, Slide,
   FormControl, FormLabel, RadioGroup, FormControlLabel, Radio
 } from '@mui/material';
-import { Edit, Delete } from '@mui/icons-material';
+import { Edit } from '@mui/icons-material';
 import SearchBar from '../../components/SearchBar';
-import ConfirmDialog from '../../components/ConfirmDialog';
+import { canCreate, canUpdate } from '../../utils/perm'; // role-aware gating
 
 const Transition = forwardRef(function Transition(props, ref) {
   return <Slide direction="up" ref={ref} {...props} />;
 });
 
+// helper to convert dropdown value to query boolean
+const statusToIsActive = (status) =>
+  status === 'active' ? true : status === 'inactive' ? false : null;
+
 export default function CostCentreManagement() {
+  // ---- role gates (evaluate from token/localStorage) ----
+  const CAN_ADD  = canCreate('cost_centres'); // SU/ACCOUNTANT
+  const CAN_EDIT = canUpdate('cost_centres'); // SU/ACCOUNTANT
+
   const [companies, setCompanies] = useState([]);
   const [costCentres, setCostCentres] = useState([]);
+
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [searchQuery, setSearchQuery] = useState('');
-  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
-  const [selectedCostCentre, setSelectedCostCentre] = useState(null);
+
+  // active/inactive filter ('', 'active', 'inactive')
+  const [selectedStatus, setSelectedStatus] = useState('');
 
   const [form, setForm] = useState({
     company: '',
@@ -47,16 +58,20 @@ export default function CostCentreManagement() {
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(5);
 
-  const handleChangePage = (event, newPage) => setPage(newPage);
-  const handleChangeRowsPerPage = (event) => {
-    setRowsPerPage(parseInt(event.target.value, 10));
+  const handleChangePage = (_e, newPage) => setPage(newPage);
+  const handleChangeRowsPerPage = (e) => {
+    setRowsPerPage(parseInt(e.target.value, 10));
     setPage(0);
   };
 
   const fetchCostCentres = async () => {
     try {
-      const res = await API.get('cost-centres/');
-      setCostCentres(res.data);
+      const params = { include_inactive: true };
+      const isActive = statusToIsActive(selectedStatus);
+      if (isActive !== null) params.is_active = isActive;
+
+      const res = await API.get('cost-centres/', { params });
+      setCostCentres(Array.isArray(res.data) ? res.data : (res.data?.results || []));
     } catch (err) {
       setSnackbar({ open: true, message: 'Error fetching cost centres', severity: 'error' });
     }
@@ -65,7 +80,7 @@ export default function CostCentreManagement() {
   const fetchCompanies = async () => {
     try {
       const res = await API.get('companies/');
-      setCompanies(res.data);
+      setCompanies(Array.isArray(res.data) ? res.data : (res.data?.results || []));
     } catch (err) {
       setSnackbar({ open: true, message: 'Error fetching companies', severity: 'error' });
     }
@@ -74,7 +89,14 @@ export default function CostCentreManagement() {
   useEffect(() => {
     fetchCostCentres();
     fetchCompanies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // refetch when status filter changes (server filtering)
+  useEffect(() => {
+    fetchCostCentres();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStatus]);
 
   const validateForm = (data, isEdit = false) => {
     const errors = {};
@@ -88,7 +110,7 @@ export default function CostCentreManagement() {
     return errors;
   };
 
-    const defaultForm = {
+  const defaultForm = {
     company: '',
     name: '',
     transaction_direction: '',
@@ -105,6 +127,10 @@ export default function CostCentreManagement() {
   };
 
   const handleAddCostCentre = async () => {
+    if (!CAN_ADD) {
+      setSnackbar({ open: true, message: 'You do not have permission to add cost centres.', severity: 'warning' });
+      return;
+    }
     const errors = validateForm(form);
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
@@ -115,15 +141,13 @@ export default function CostCentreManagement() {
       setSnackbar({ open: true, message: 'Cost Centre added successfully!', severity: 'success' });
       fetchCostCentres();
       setOpen(false);
-      setForm({ company: '', name: '', transaction_direction: '', notes: '' });
+      setForm(defaultForm);
       setFormErrors({});
     } catch (err) {
       if (err.response?.status === 400) {
         const backendErrors = err.response.data;
         const newFormErrors = { ...formErrors };
-        if (backendErrors.name) {
-          newFormErrors.name = backendErrors.name[0];
-        }
+        if (backendErrors.name) newFormErrors.name = backendErrors.name[0];
         setFormErrors(newFormErrors);
       } else {
         setSnackbar({
@@ -135,14 +159,15 @@ export default function CostCentreManagement() {
     }
   };
 
-  const handleRealTimeValidation = (field, value, setForm, form, setErrors) => {
-    const updatedForm = { ...form, [field]: value };
-    setForm(updatedForm);
-    const errors = validateForm(updatedForm, form === editForm);
+  const handleRealTimeValidation = (field, value, setter, current, setErrors) => {
+    const updated = { ...current, [field]: value };
+    setter(updated);
+    const errors = validateForm(updated, current === editForm);
     setErrors(errors);
   };
 
   const openEditModal = (costCentre) => {
+    if (!CAN_EDIT) return; // hard block if no permission
     setEditForm({
       cost_centre_id: costCentre.cost_centre_id,
       company: costCentre.company,
@@ -156,6 +181,10 @@ export default function CostCentreManagement() {
   };
 
   const handleEditCostCentre = async () => {
+    if (!CAN_EDIT) {
+      setSnackbar({ open: true, message: 'You do not have permission to edit cost centres.', severity: 'warning' });
+      return;
+    }
     const errors = validateForm(editForm, true);
     if (Object.keys(errors).length > 0) {
       setEditFormErrors(errors);
@@ -185,52 +214,56 @@ export default function CostCentreManagement() {
     }
   };
 
-  const deleteCostCentre = async (id) => {
-    try {
-      await API.delete(`cost-centres/${id}/`);
-      setSnackbar({ open: true, message: 'Cost Centre deleted successfully!', severity: 'success' });
-      fetchCostCentres();
-    } catch (err) {
-      setSnackbar({ open: true, message: 'Delete failed', severity: 'error' });
-    }
-  };
-
-  const handleConfirmAction = async () => {
-    if (!selectedCostCentre) return;
-
-    try {
-      if (selectedCostCentre.is_active) {
-        await API.delete(`cost-centres/${selectedCostCentre.cost_centre_id}/`);
-        setSnackbar({ open: true, message: 'Cost Centre deactivated.', severity: 'success' });
-      } else {
-        await API.patch(`cost-centres/${selectedCostCentre.cost_centre_id}/`, { is_active: true });
-        setSnackbar({ open: true, message: 'Cost Centre reactivated.', severity: 'success' });
-      }
-      fetchCostCentres();
-    } catch (err) {
-      setSnackbar({ open: true, message: 'Action failed.', severity: 'error' });
-    } finally {
-      setConfirmDialogOpen(false);
-      setSelectedCostCentre(null);
-    }
-  };
-
-  const filteredcostcenter = costCentres.filter((c) =>
-    c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    c.company_name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // client-side filter on top of server results (keeps UI consistent)
+  const filteredcostcenter = costCentres.filter((c) => {
+    const matchesText =
+      (c.name || '').toLowerCase().includes((searchQuery || '').toLowerCase()) ||
+      (c.company_name || '').toLowerCase().includes((searchQuery || '').toLowerCase());
+    const matchesStatus =
+      selectedStatus === ''
+        ? true
+        : selectedStatus === 'active'
+        ? !!c.is_active
+        : !c.is_active;
+    return matchesText && matchesStatus;
+  });
 
   return (
     <div className="p-[35px]">
       <Typography variant="h5" fontWeight="bold">Cost Centre Management</Typography>
-      <div className="flex justify-between items-center mb-6 mt-6">
-        <SearchBar
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          label="Search Cost Centre"
-          placeholder="Search by Cost Centre Name or Company"
-        />
-        <Button variant="contained" color="primary" onClick={() => setOpen(true)}>Add Cost Centre</Button>
+
+      {/* Controls row: search on the left; status + add button (gated) on the right */}
+      <div className="flex justify-between items-center mb-6 mt-6 gap-3 flex-wrap">
+        <div className="flex-1 min-w-[260px] max-w-sm">
+          <SearchBar
+            value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); setPage(0); }}
+            label="Search Cost Centre"
+            placeholder="Search by Cost Centre Name or Company"
+          />
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Status filter (All / Active / Inactive) */}
+          <TextField
+            select
+            size="small"
+            label="Status"
+            value={selectedStatus}
+            onChange={(e) => { setSelectedStatus(e.target.value); setPage(0); }}
+            sx={{ minWidth: 140 }}
+          >
+            <MenuItem value="">All</MenuItem>
+            <MenuItem value="active">Active</MenuItem>
+            <MenuItem value="inactive">Inactive</MenuItem>
+          </TextField>
+
+          {CAN_ADD && (
+            <Button variant="contained" color="primary" onClick={() => setOpen(true)}>
+              Add Cost Centre
+            </Button>
+          )}
+        </div>
       </div>
 
       <Card sx={{ boxShadow: 3, borderRadius: 3 }}>
@@ -244,48 +277,46 @@ export default function CostCentreManagement() {
                   <TableCell sx={{ fontWeight: 'bold' }}>Name</TableCell>
                   <TableCell sx={{ fontWeight: 'bold' }}>Direction</TableCell>
                   <TableCell sx={{ fontWeight: 'bold' }}>Notes</TableCell>
-                  {/* <TableCell sx={{ fontWeight: 'bold' }}>Active</TableCell> */}
-                  <TableCell sx={{ fontWeight: 'bold' }} align="center">Actions</TableCell>
+                  {CAN_EDIT && (
+                    <TableCell sx={{ fontWeight: 'bold' }} align="center">Actions</TableCell>
+                  )}
                 </TableRow>
               </TableHead>
               <TableBody>
-                {filteredcostcenter.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage).map((c, index) => (
-                  <TableRow
-                    key={c.cost_centre_id}
-                    hover
-                    sx={{
-                      backgroundColor: c.is_active ? '#e8f5e9' : '#fffde7'
-                    }}
-                  >
-                    <TableCell>{page * rowsPerPage + index + 1}</TableCell>
-                    <TableCell>{c.company_name}</TableCell>
-                    <TableCell>{c.name}</TableCell>
-                    <TableCell>{c.transaction_direction}</TableCell>
-                    <TableCell>{c.notes}</TableCell>
-                    {/* <TableCell>{c.is_active ? 'Yes' : 'No'}</TableCell> */}
-                    <TableCell align="center">
-                    {/* <Tooltip title={c.is_active ? "Deactivate" : "Reactivate"} arrow>
-                        <IconButton
-                          color={c.is_active ? "error" : "success"}
-                          onClick={() => {
-                            setSelectedCostCentre(c);
-                            setConfirmDialogOpen(true);
-                          }}
-                        >
-                          <Delete />
-                        </IconButton>
-                      </Tooltip> */}
-                      <Tooltip title="Edit" arrow>
-                        <IconButton color="primary" onClick={() => openEditModal(c)}>
-                          <Edit />
-                        </IconButton>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {filteredcostcenter
+                  .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
+                  .map((c, index) => (
+                    <TableRow
+                      key={c.cost_centre_id}
+                      hover
+                      sx={{ backgroundColor: c.is_active ? '#e8f5e9' : '#fffde7' }}
+                    >
+                      <TableCell>{page * rowsPerPage + index + 1}</TableCell>
+                      <TableCell>{c.company_name}</TableCell>
+                      <TableCell>{c.name}</TableCell>
+                      <TableCell>{c.transaction_direction}</TableCell>
+                      <TableCell>{c.notes}</TableCell>
+                      {CAN_EDIT && (
+                        <TableCell align="center">
+                          <Tooltip title="Edit" arrow>
+                            <span>
+                              <IconButton
+                                color="primary"
+                                onClick={() => openEditModal(c)}
+                                disabled={!CAN_EDIT}
+                              >
+                                <Edit />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))}
               </TableBody>
             </Table>
           </TableContainer>
+
           <TablePagination
             component="div"
             count={filteredcostcenter.length}
@@ -300,7 +331,7 @@ export default function CostCentreManagement() {
         </CardContent>
       </Card>
 
-      {/* Add Dialog */}
+      {/* Add Dialog (rendered but only openable if CAN_ADD) */}
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
@@ -308,10 +339,28 @@ export default function CostCentreManagement() {
         maxWidth="sm"
         TransitionComponent={Transition}
         keepMounted
-        PaperProps={{ sx: { borderRadius: 3, p: 2 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 4,
+            p: 3,
+            backgroundColor: '#fafafa',
+            boxShadow: 10,
+            overflowY: 'hidden'
+          }
+        }}
       >
         <DialogTitle>Add Cost Centre</DialogTitle>
-        <DialogContent>
+        <DialogContent
+          dividers
+          sx={{
+            p: 3,
+            overflowY: 'auto',
+            maxHeight: '60vh',
+            '&::-webkit-scrollbar': { display: 'none' },
+            scrollbarWidth: 'none',
+            '-ms-overflow-style': 'none',
+          }}
+        >
           <TextField
             select
             fullWidth
@@ -361,7 +410,7 @@ export default function CostCentreManagement() {
             onChange={(e) => setForm({ ...form, notes: e.target.value })}
           />
         </DialogContent>
-       <DialogActions sx={{ p: 3, pt: 0 }}>
+        <DialogActions sx={{ p: 3, pt: 0 }}>
           <Button
             onClick={() => {
               setOpen(false);
@@ -402,7 +451,7 @@ export default function CostCentreManagement() {
         </DialogActions>
       </Dialog>
 
-      {/* Edit Dialog */}
+      {/* Edit Dialog (rendered but only usable if CAN_EDIT) */}
       <Dialog
         open={editOpen}
         onClose={() => setEditOpen(false)}
@@ -410,10 +459,28 @@ export default function CostCentreManagement() {
         maxWidth="sm"
         TransitionComponent={Transition}
         keepMounted
-        PaperProps={{ sx: { borderRadius: 3, p: 2 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 4,
+            p: 3,
+            backgroundColor: '#fafafa',
+            boxShadow: 10,
+            overflowY: 'hidden'
+          }
+        }}
       >
         <DialogTitle>Edit Cost Centre</DialogTitle>
-        <DialogContent >
+        <DialogContent
+          dividers
+          sx={{
+            p: 3,
+            overflowY: 'auto',
+            maxHeight: '60vh',
+            '&::-webkit-scrollbar': { display: 'none' },
+            scrollbarWidth: 'none',
+            '-ms-overflow-style': 'none',
+          }}
+        >
           <TextField
             fullWidth
             margin="dense"
@@ -471,7 +538,7 @@ export default function CostCentreManagement() {
             </RadioGroup>
           </FormControl>
         </DialogContent>
-       <DialogActions sx={{ p: 3, pt: 0 }}>
+        <DialogActions sx={{ p: 3, pt: 0 }}>
           <Button
             onClick={() => {
               setEditOpen(false);
@@ -526,8 +593,6 @@ export default function CostCentreManagement() {
           {snackbar.message}
         </Alert>
       </Snackbar>
-
-  
     </div>
   );
 }

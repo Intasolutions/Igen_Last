@@ -1,0 +1,208 @@
+'use client';
+
+import React, { useState, useEffect, forwardRef } from 'react';
+import API from '../../api/axios';
+import {
+  Button, Dialog, DialogTitle, DialogContent, DialogActions,
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
+  Paper, Snackbar, Alert, FormControl, InputLabel, Select, MenuItem, Typography
+} from '@mui/material';
+import Slide from '@mui/material/Slide';
+
+// Slide transition
+const Transition = forwardRef(function Transition(props, ref) {
+  return <Slide direction="up" ref={ref} {...props} />;
+});
+
+export default function ClassifyPage() {
+  const [transactions, setTransactions] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [selectedTx, setSelectedTx] = useState(null);
+  const [formData, setFormData] = useState({
+    transaction_type: '',
+    cost_centre: '',
+    entity: '',
+    asset: '',
+    contract: ''
+  });
+  const [errors, setErrors] = useState({});
+  const [dropdowns, setDropdowns] = useState({
+    transactionTypes: [],
+    costCentres: [],
+    entities: [],
+    assets: [],
+    contracts: []
+  });
+  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
+
+  // Fetch unclassified transactions
+  useEffect(() => {
+    fetchTransactions();
+    fetchDropdowns();
+  }, []);
+
+  const fetchTransactions = async () => {
+    try {
+      const res = await// ❌ Wrong
+API.get("/unclassified/")
+
+// ✅ Correct
+API.get("/api/tx-classify/unclassified/")
+;
+      setTransactions(res.data);
+    } catch (err) {
+      console.error('Error fetching transactions', err);
+    }
+  };
+
+  const fetchDropdowns = async () => {
+    try {
+      const [tt, cc, en, as, co] = await Promise.all([
+        API.get('/transaction-types/'),
+        API.get('/cost-centres/'),
+        API.get('/entities/'),
+        API.get('/assets/'),
+        API.get('/contracts/')
+      ]);
+      setDropdowns({
+        transactionTypes: tt.data,
+        costCentres: cc.data,
+        entities: en.data,
+        assets: as.data,
+        contracts: co.data
+      });
+    } catch (err) {
+      console.error('Error fetching dropdowns', err);
+    }
+  };
+
+  const handleOpen = (tx) => {
+    setSelectedTx(tx);
+    setFormData({
+      transaction_type: tx.transaction_type || '',
+      cost_centre: tx.cost_centre || '',
+      entity: tx.entity || '',
+      asset: tx.asset || '',
+      contract: tx.contract || ''
+    });
+    setErrors({});
+    setOpen(true);
+  };
+
+  const handleClose = () => {
+    setOpen(false);
+    setSelectedTx(null);
+    setFormData({ transaction_type: '', cost_centre: '', entity: '', asset: '', contract: '' });
+  };
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+    setErrors({ ...errors, [e.target.name]: '' });
+  };
+
+  // Validate required fields
+  const validate = () => {
+    let tempErrors = {};
+    if (!formData.transaction_type) tempErrors.transaction_type = "Transaction Type is required";
+    if (!formData.cost_centre) tempErrors.cost_centre = "Cost Centre is required";
+    if (!formData.entity) tempErrors.entity = "Entity is required";
+    if (!formData.asset) tempErrors.asset = "Asset is required";
+    if (!formData.contract) tempErrors.contract = "Contract is required";
+    setErrors(tempErrors);
+    return Object.keys(tempErrors).length === 0;
+  };
+
+  const handleSubmit = async () => {
+    if (!validate()) return;
+    try {
+      await API.patch(`/transactions/${selectedTx.id}/`, formData);
+      setSnackbar({ open: true, message: 'Transaction classified successfully!', severity: 'success' });
+      fetchTransactions();
+      handleClose();
+    } catch (err) {
+      console.error('Error updating transaction', err);
+      setSnackbar({ open: true, message: 'Failed to classify transaction', severity: 'error' });
+    }
+  };
+
+  return (
+    <div className="p-6">
+      <Typography variant="h5" gutterBottom>
+        Unclassified Transactions
+      </Typography>
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>ID</TableCell>
+              <TableCell>Description</TableCell>
+              <TableCell>Amount</TableCell>
+              <TableCell>Date</TableCell>
+              <TableCell>Actions</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {transactions.map((tx) => (
+              <TableRow key={tx.id}>
+                <TableCell>{tx.id}</TableCell>
+                <TableCell>{tx.description}</TableCell>
+                <TableCell>{tx.amount}</TableCell>
+                <TableCell>{tx.date}</TableCell>
+                <TableCell>
+                  <Button variant="contained" size="small" onClick={() => handleOpen(tx)}>
+                    Classify
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+            {transactions.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={5} align="center">
+                  No unclassified transactions
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      {/* Classification Dialog */}
+      <Dialog open={open} TransitionComponent={Transition} keepMounted onClose={handleClose} maxWidth="sm" fullWidth>
+        <DialogTitle>Classify Transaction</DialogTitle>
+        <DialogContent dividers>
+          {['transaction_type', 'cost_centre', 'entity', 'asset', 'contract'].map((field) => (
+            <FormControl fullWidth margin="normal" key={field} error={Boolean(errors[field])}>
+              <InputLabel>
+                {field.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+              </InputLabel>
+              <Select name={field} value={formData[field]} onChange={handleChange} label={field}>
+                {dropdowns[field + (field.endsWith('s') ? '' : 's')]?.map((opt) => (
+                  <MenuItem key={opt.id} value={opt.id}>{opt.name}</MenuItem>
+                ))}
+              </Select>
+              {errors[field] && (
+                <Typography variant="caption" color="error">
+                  {errors[field]}
+                </Typography>
+              )}
+            </FormControl>
+          ))}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClose} color="secondary">Cancel</Button>
+          <Button onClick={handleSubmit} variant="contained" color="primary">Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Snackbar */}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={3000}
+        onClose={() => setSnackbar({ ...snackbar, open: false })}
+      >
+        <Alert severity={snackbar.severity}>{snackbar.message}</Alert>
+      </Snackbar>
+    </div>
+  );
+}

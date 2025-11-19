@@ -1,7 +1,9 @@
 # tx_classify/models.py
 from __future__ import annotations
 
+import re
 import uuid
+from decimal import Decimal, InvalidOperation
 from django.db import models
 
 from bank_uploads.models import BankTransaction
@@ -74,7 +76,7 @@ class Classification(models.Model):
 
     class Meta:
         db_table = "tx_classify_transactionclassification"
-        # managed = False
+        # managed = False  # Do not run migrations against this table
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["bank_transaction"]),
@@ -83,3 +85,29 @@ class Classification(models.Model):
 
     def __str__(self) -> str:
         return f"{self.classification_id} | tx={self.bank_transaction_id} | ₹{self.amount}"
+
+    # ---- Derived helpers ----
+    @property
+    def parsed_margin(self) -> Decimal | None:
+        """
+        Extract 'Margin: <amount>' from remarks text if present.
+        Returns a Decimal or None.
+        """
+        if not self.remarks:
+            return None
+        match = re.search(r"Margin:\s*([0-9]+(?:\.[0-9]{1,2})?)", self.remarks)
+        if not match:
+            return None
+        try:
+            return Decimal(match.group(1))
+        except InvalidOperation:
+            return None
+
+    @property
+    def cleaned_remarks(self) -> str | None:
+        """
+        Return remarks text with any 'Margin: ...' note removed.
+        """
+        if not self.remarks:
+            return None
+        return re.sub(r"\s*\|?\s*Margin:\s*[0-9]+(?:\.[0-9]{1,2})?", "", self.remarks).strip() or None

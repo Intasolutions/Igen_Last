@@ -25,6 +25,7 @@ class Contact(models.Model):
         ('Broker', 'Broker'),
         ('Key Holder', 'Key Holder'),
         ('Project Stakeholder', 'Project Stakeholder'),
+        ('Project Manager', 'Project Manager'),
         ('Other', 'Other'),
     ]
 
@@ -33,17 +34,36 @@ class Contact(models.Model):
     type = models.CharField(max_length=20, choices=TYPE_CHOICES, default=INDIVIDUAL)
     stakeholder_types = models.JSONField(default=list)
 
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, related_name='contacts', null=True, blank=True)
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        related_name='contacts',
+        null=True,
+        blank=True
+    )
 
     phone = models.CharField(
-        max_length=10,
-        validators=[RegexValidator(r'^\d{10}$', message='Phone number must be exactly 10 digits')]
+        max_length=20,
+        unique=True,  # enforce uniqueness at DB level
+        error_messages={
+            'unique': 'This mobile number is already in use.'  # friendly message
+        },
+        validators=[
+            RegexValidator(
+                regex=r'^\+?[0-9\s\-]{7,20}$',
+                message='Enter a valid phone number (7–20 digits, may include +, space, -)'
+            )
+        ]
     )
     alternate_phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
 
     address = models.TextField(blank=True, null=True)
+
+    # PAN is NON-MANDATORY
+    # (optional: keep unique so if provided it doesn't duplicate)
     pan = models.CharField(max_length=15, unique=True, blank=True, null=True)
+
     gst = models.CharField(max_length=25, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
 
@@ -57,7 +77,6 @@ class Contact(models.Model):
 
     # Relationships
     linked_properties = models.ManyToManyField('properties.Property', blank=True)
-    
 
     # Audit info
     created_at = models.DateTimeField(auto_now_add=True)
@@ -65,12 +84,16 @@ class Contact(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
-
     def clean(self):
+        # Require GST only for Company contacts
         if self.type == self.COMPANY and not self.gst:
             raise ValidationError({'gst': 'GST number is required for contacts of type Company.'})
+
+        # At least one stakeholder type
         if not self.stakeholder_types:
             raise ValidationError({'stakeholder_types': 'At least one stakeholder type must be selected.'})
+
+        # PAN stays optional; no requirement here
 
     def __str__(self):
         return self.full_name

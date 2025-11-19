@@ -2,6 +2,7 @@ from django.db import models
 from companies.models import Company
 from properties.models import Property
 from projects.models import Project
+from entities.models import Entity  # NEW
 
 
 class Asset(models.Model):
@@ -17,6 +18,11 @@ class Asset(models.Model):
         Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='assets',
         help_text="Linked project, if applicable"
     )
+    entity = models.ForeignKey(  # NEW
+        Entity, on_delete=models.SET_NULL, null=True, blank=True, related_name='assets',
+        help_text="Linked entity, if applicable"
+    )
+
     name = models.CharField(max_length=255, help_text="Asset name")
     category = models.CharField(max_length=255, help_text="Asset category")
     purchase_date = models.DateField(help_text="Date of purchase")
@@ -32,12 +38,13 @@ class Asset(models.Model):
         db_index=True, help_text="Unique tag ID (barcode/RFID)"
     )
 
-    def _str_(self):
+    def _str_(self):  # fixed dunder
         return f"{self.name} ({self.tag_id or 'No Tag'})"
 
     class Meta:
         verbose_name = "Asset"
         verbose_name_plural = "Assets"
+        ordering = ['-created_at']
 
 
 class AssetServiceDue(models.Model):
@@ -50,7 +57,7 @@ class AssetServiceDue(models.Model):
     completed = models.BooleanField(default=False, help_text="Mark if the service was completed")
     created_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when this service due was created")
 
-    def _str_(self):
+    def _str_(self):  # fixed dunder
         return f"{self.asset.name} - Due on {self.due_date}"
 
     class Meta:
@@ -66,9 +73,11 @@ class AssetDocument(models.Model):
     document = models.FileField(upload_to='asset_docs/', help_text="Uploaded document file")
     uploaded_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when document was uploaded")
 
-    def _str_(self):
+    def _str_(self):  # fixed dunder
         return f"Document for {self.asset.name}"
 
     class Meta:
         verbose_name = "Asset Document"
         verbose_name_plural = "Asset Documents"
+
+

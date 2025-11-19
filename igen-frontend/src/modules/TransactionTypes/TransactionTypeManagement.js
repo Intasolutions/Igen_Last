@@ -8,10 +8,16 @@ import {
   FormControl, FormLabel, RadioGroup, FormControlLabel, Radio,
   Switch, Chip, Box
 } from '@mui/material';
-import { Edit, Delete } from '@mui/icons-material';
+import { Edit /*, Delete*/ } from '@mui/icons-material';
 import SearchBar from '../../components/SearchBar';
+import { canCreate, canUpdate } from '../../utils/perm'; // ⬅️ role gates
 
 export default function TransactionTypeManagement() {
+  // ---- role gates ----
+  // Use your matrix key for this module; "transaction_types" matches the backend naming used elsewhere.
+  const CAN_ADD  = canCreate('transaction_types');
+  const CAN_EDIT = canUpdate('transaction_types');
+
   const [transactionTypes, setTransactionTypes] = useState([]);
   const [filteredTransactionTypes, setFilteredTransactionTypes] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -24,12 +30,16 @@ export default function TransactionTypeManagement() {
   const [rowsPerPage, setRowsPerPage] = useState(5);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // NEW: status filter ('', 'active', 'inactive')
+  const [selectedStatus, setSelectedStatus] = useState('');
+
   const defaultForm = {
     company: '',
     cost_centre: '',
     name: '',
     direction: '',
     gst_applicable: false,
+    margin_applicable: false,
     is_active: true,
     remarks: ''
   };
@@ -41,29 +51,50 @@ export default function TransactionTypeManagement() {
     fetchTransactionTypes();
     fetchCompanies();
     fetchCostCentres();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // refetch from server when status filter changes (so server-side filters apply)
   useEffect(() => {
-    // Filter transaction types based on search query
-    const filtered = transactionTypes.filter(t =>
-      t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.company_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.cost_centre_name?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    fetchTransactionTypes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStatus]);
+
+  // search + status filter (client-side) + pagination reset
+  useEffect(() => {
+    const q = (searchQuery || '').toLowerCase();
+    const filtered = transactionTypes.filter(t => {
+      const matchesText =
+        (t.name || '').toLowerCase().includes(q) ||
+        (t.company_name || '').toLowerCase().includes(q) ||
+        (t.cost_centre_name || '').toLowerCase().includes(q);
+
+      const matchesStatus =
+        selectedStatus === ''
+          ? true
+          : selectedStatus === 'active'
+          ? t.status === 'Active'
+          : t.status === 'Inactive';
+
+      return matchesText && matchesStatus;
+    });
+
     setFilteredTransactionTypes(filtered);
-    setPage(0); // Reset to first page when filtering
-  }, [searchQuery, transactionTypes]);
+    setPage(0);
+  }, [searchQuery, transactionTypes, selectedStatus]);
 
   const fetchTransactionTypes = async () => {
     try {
-      const res = await API.get('transaction-types/');
-      // Map status to is_active for internal use
-      const mappedData = res.data.map(t => ({
+      const params = {};
+      if (selectedStatus) params.status = selectedStatus === 'active' ? 'Active' : 'Inactive';
+
+      const res = await API.get('transaction-types/', { params });
+      const mappedData = (res.data || []).map(t => ({
         ...t,
-        is_active: t.status === 'Active'
+        is_active: t.status === 'Active',
+        margin_applicable: t.margin_applicable ?? false,
       }));
       setTransactionTypes(mappedData);
-      setFilteredTransactionTypes(mappedData);
     } catch (err) {
       setSnackbar({ open: true, message: 'Error fetching transaction types', severity: 'error' });
     }
@@ -72,8 +103,8 @@ export default function TransactionTypeManagement() {
   const fetchCompanies = async () => {
     try {
       const res = await API.get('companies/');
-      setCompanies(res.data);
-    } catch (err) {
+      setCompanies(res.data || []);
+    } catch {
       setSnackbar({ open: true, message: 'Error fetching companies', severity: 'error' });
     }
   };
@@ -81,10 +112,21 @@ export default function TransactionTypeManagement() {
   const fetchCostCentres = async () => {
     try {
       const res = await API.get('cost-centres/');
-      setCostCentres(res.data);
-    } catch (err) {
+      setCostCentres(res.data || []);
+    } catch {
       setSnackbar({ open: true, message: 'Error fetching cost centres', severity: 'error' });
     }
+  };
+
+  const hasDuplicate = (candidate, excludeId = null) => {
+    const nm = (candidate.name || '').trim().toLowerCase();
+    return transactionTypes.some(t =>
+      (excludeId ? t.transaction_type_id !== excludeId : true) &&
+      (t.company === candidate.company) &&
+      (t.cost_centre === candidate.cost_centre) &&
+      (t.direction === candidate.direction) &&
+      ((t.name || '').trim().toLowerCase() === nm)
+    );
   };
 
   const validateForm = () => {
@@ -98,14 +140,8 @@ export default function TransactionTypeManagement() {
     else if (!['Credit', 'Debit'].includes(form.direction)) newErrors.direction = 'Invalid direction';
     if (typeof form.is_active !== 'boolean') newErrors.is_active = 'Status must be Active or Inactive';
 
-    // Check for duplicate under same company
-    const duplicate = transactionTypes.find(t =>
-      t.name.trim().toLowerCase() === form.name.trim().toLowerCase() &&
-      t.company === form.company &&
-      (!isEditMode || t.transaction_type_id !== editId)
-    );
-    if (duplicate) {
-      newErrors.name = 'A transaction type with the same name under the same company already exists';
+    if (hasDuplicate(form, isEditMode ? editId : null)) {
+      newErrors.name = 'Duplicate: same Company, Cost Centre, Direction, and Name already exists';
     }
 
     setErrors(newErrors);
@@ -115,8 +151,8 @@ export default function TransactionTypeManagement() {
   const handleRealTimeValidation = (field, value) => {
     const updatedForm = { ...form, [field]: value };
     setForm(updatedForm);
-    const newErrors = {};
 
+    const newErrors = {};
     if (!updatedForm.company) newErrors.company = 'Company is required';
     if (!updatedForm.cost_centre) newErrors.cost_centre = 'Cost Centre is required';
     if (!updatedForm.name) newErrors.name = 'Name is required';
@@ -125,33 +161,53 @@ export default function TransactionTypeManagement() {
     else if (!['Credit', 'Debit'].includes(updatedForm.direction)) newErrors.direction = 'Invalid direction';
     if (typeof updatedForm.is_active !== 'boolean') newErrors.is_active = 'Status must be Active or Inactive';
 
-    const duplicate = transactionTypes.find(t =>
-      t.name.trim().toLowerCase() === updatedForm.name.trim().toLowerCase() &&
-      t.company === updatedForm.company &&
-      (!isEditMode || t.transaction_type_id !== editId)
-    );
-    if (duplicate) {
-      newErrors.name = 'A transaction type with the same name under the same company already exists';
+    if (hasDuplicate(updatedForm, isEditMode ? editId : null)) {
+      newErrors.name = 'Duplicate: same Company, Cost Centre, Direction, and Name already exists';
     }
 
     setErrors(newErrors);
+  };
+
+  const handleCompanyChange = (companyId) => {
+    // set company, filter cost centres implicitly via filteredCostCentres below
+    // If current cost_centre doesn't belong to selected company, clear it
+    const selectedCompanyId = companyId;
+    const belongs = costCentres.some(cc => {
+      const ccCompany = cc.company ?? cc.company_id ?? (cc.company && cc.company.id) ?? null;
+      return String(ccCompany) === String(selectedCompanyId);
+    });
+
+    const newCostCentreValue = belongs ? form.cost_centre : '';
+    handleRealTimeValidation('company', selectedCompanyId);
+    if (!belongs && form.cost_centre) {
+      handleRealTimeValidation('cost_centre', '');
+    } else {
+      setForm(prev => ({ ...prev, cost_centre: newCostCentreValue }));
+    }
   };
 
   const handleSubmitTransactionType = async () => {
     if (!validateForm()) return;
 
     try {
-      // Map is_active to status for API
       const payload = {
         ...form,
-        status: form.is_active ? 'Active' : 'Inactive'
+        status: form.is_active ? 'Active' : 'Inactive',
       };
       delete payload.is_active;
 
       if (isEditMode) {
+        if (!CAN_EDIT) {
+          setSnackbar({ open: true, message: 'You do not have permission to edit transaction types.', severity: 'warning' });
+          return;
+        }
         await API.put(`transaction-types/${editId}/`, payload);
         setSnackbar({ open: true, message: 'Transaction Type updated successfully', severity: 'success' });
       } else {
+        if (!CAN_ADD) {
+          setSnackbar({ open: true, message: 'You do not have permission to add transaction types.', severity: 'warning' });
+          return;
+        }
         await API.post('transaction-types/', payload);
         setSnackbar({ open: true, message: 'Transaction Type added successfully', severity: 'success' });
       }
@@ -159,7 +215,11 @@ export default function TransactionTypeManagement() {
       setOpen(false);
       resetForm();
     } catch (err) {
-      setSnackbar({ open: true, message: err.response?.data?.detail || 'Operation failed', severity: 'error' });
+      setSnackbar({
+        open: true,
+        message: err.response?.data?.detail || 'Operation failed',
+        severity: 'error',
+      });
     }
   };
 
@@ -180,70 +240,130 @@ export default function TransactionTypeManagement() {
     }
   };
 
-  const openEditDialog = (transaction) => {
+  const openEditDialog = (t) => {
+    if (!CAN_EDIT) {
+      setSnackbar({ open: true, message: 'You do not have permission to edit transaction types.', severity: 'warning' });
+      return;
+    }
     setForm({
-      company: transaction.company,
-      cost_centre: transaction.cost_centre,
-      name: transaction.name,
-      direction: transaction.direction,
-      gst_applicable: transaction.gst_applicable,
-      is_active: transaction.status === 'Active',
-      remarks: transaction.remarks || ''
+      company: t.company,
+      cost_centre: t.cost_centre,
+      name: t.name,
+      direction: t.direction,
+      gst_applicable: !!t.gst_applicable,
+      margin_applicable: !!t.margin_applicable,
+      is_active: t.status === 'Active',
+      remarks: t.remarks || ''
     });
-    setEditId(transaction.transaction_type_id);
+    setEditId(t.transaction_type_id);
     setIsEditMode(true);
     setOpen(true);
   };
 
-  const handleChangePage = (event, newPage) => setPage(newPage);
-  const handleChangeRowsPerPage = (event) => {
-    setRowsPerPage(parseInt(event.target.value, 10));
+  const handleChangePage = (_e, newPage) => setPage(newPage);
+  const handleChangeRowsPerPage = (e) => {
+    const val = parseInt(e.target.value, 10);
+    setRowsPerPage(val);
     setPage(0);
   };
 
+  // === COST CENTRE FILTERING ===
+  const filteredCostCentres = costCentres.filter(cc => {
+    if (!form.company) return true; // if no company selected, show all
+    const ccCompany = cc.company ?? cc.company_id ?? (cc.company && cc.company.id) ?? null;
+    return String(ccCompany) === String(form.company);
+  });
+
+  const pagedRows = rowsPerPage > 0
+    ? filteredTransactionTypes.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
+    : filteredTransactionTypes;
+
   return (
     <div className="p-[25px]">
-       <Typography variant="h5" fontWeight="bold">Transaction Type Management</Typography>
-      <div className="flex justify-between items-center mb-6 mt-6">
-       
-        <div className="flex-1 max-w-sm">
+      <Typography variant="h5" fontWeight="bold">Transaction Type Management</Typography>
+
+      <div className="flex justify-between items-center mb-6 mt-6 gap-3 flex-wrap">
+        <div className="flex-1 max-w-sm min-w-[260px]">
           <SearchBar
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search by name, company, or cost centre..."
           />
-          </div>
-          <Button variant="contained" color="primary" onClick={() => { setOpen(true); resetForm(); }}>
-            Add Transaction Type
-          </Button>
-        
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Status filter */}
+          <TextField
+            select
+            size="small"
+            label="Status"
+            value={selectedStatus}
+            onChange={(e) => setSelectedStatus(e.target.value)}
+            sx={{ minWidth: 140 }}
+          >
+            <MenuItem value="">All</MenuItem>
+            <MenuItem value="active">Active</MenuItem>
+            <MenuItem value="inactive">Inactive</MenuItem>
+          </TextField>
+
+          {CAN_ADD && (
+            <Button
+              variant="contained"
+              color="primary"
+              onClick={() => { resetForm(); setOpen(true); }}
+            >
+              Add Transaction Type
+            </Button>
+          )}
+        </div>
       </div>
 
       <Dialog
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => { setOpen(false); resetForm(); }}
         fullWidth
         maxWidth="sm"
-        PaperProps={{ sx: { borderRadius: 3, p: 2 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 4,
+            p: 3,
+            backgroundColor: '#fafafa',
+            boxShadow: 10,
+            overflowY: 'hidden'
+          }
+        }}
       >
         <DialogTitle sx={{ fontWeight: 'bold' }}>
           {isEditMode ? 'Edit Transaction Type' : 'Add Transaction Type'}
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2 }}>
+
+        <DialogContent
+          dividers
+          sx={{
+            p: 3,
+            overflowY: 'auto',
+            maxHeight: '60vh',
+            '&::-webkit-scrollbar': { display: 'none' },
+            scrollbarWidth: 'none',
+            '-ms-overflow-style': 'none',
+          }}
+        >
           <Typography variant="subtitle1" sx={{ mb: 1, color: 'primary.main' }}>
             Transaction Type Details
           </Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, }}>
+
+          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1 }}>
             <TextField
               select
               fullWidth
               label="Company"
               sx={{ my: 1.5 }}
               value={form.company}
-              onChange={(e) => handleRealTimeValidation('company', e.target.value)}
+              onChange={(e) => handleCompanyChange(e.target.value)}
               error={!!errors.company}
               helperText={errors.company}
             >
+              <MenuItem value="">Select company</MenuItem>
               {companies.map(c => (
                 <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
               ))}
@@ -259,8 +379,11 @@ export default function TransactionTypeManagement() {
               error={!!errors.cost_centre}
               helperText={errors.cost_centre}
             >
-              {costCentres.map(cc => (
-                <MenuItem key={cc.cost_centre_id} value={cc.cost_centre_id}>{cc.name}</MenuItem>
+              <MenuItem value="">Select cost centre</MenuItem>
+              {filteredCostCentres.map(cc => (
+                <MenuItem key={cc.cost_centre_id ?? cc.id ?? cc.uuid} value={cc.cost_centre_id ?? cc.id ?? cc.uuid}>
+                  {cc.name}
+                </MenuItem>
               ))}
             </TextField>
 
@@ -297,7 +420,9 @@ export default function TransactionTypeManagement() {
               <MenuItem value="Credit">Credit</MenuItem>
               <MenuItem value="Debit">Debit</MenuItem>
             </TextField>
+          </div>
 
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', marginTop: 16 }}>
             <FormControlLabel
               control={
                 <Switch
@@ -316,6 +441,25 @@ export default function TransactionTypeManagement() {
               }
               sx={{ mt: 1 }}
             />
+
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.margin_applicable}
+                  onChange={(e) => setForm({ ...form, margin_applicable: e.target.checked })}
+                  color="primary"
+                />
+              }
+              label={
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  Margin Applicable
+                  <Tooltip title="Toggle if this transaction type should be included in margin calculations">
+                    <span style={{ fontSize: '16px', cursor: 'help' }}>🛈</span>
+                  </Tooltip>
+                </div>
+              }
+              sx={{ mt: 1 }}
+            />
           </div>
 
           <FormControl component="fieldset" margin="dense" sx={{ mt: 2 }}>
@@ -323,10 +467,7 @@ export default function TransactionTypeManagement() {
             <RadioGroup
               row
               value={form.is_active}
-              onChange={(e) => {
-                console.log('Setting is_active to:', e.target.value === 'true');
-                setForm({ ...form, is_active: e.target.value === 'true' });
-              }}
+              onChange={(e) => setForm({ ...form, is_active: e.target.value === 'true' })}
               sx={{ gap: 2 }}
             >
               <FormControlLabel
@@ -344,22 +485,16 @@ export default function TransactionTypeManagement() {
             </RadioGroup>
           </FormControl>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 0 }}>
+
+        <DialogActions>
           <Button
-            onClick={() => {
-              setOpen(false);
-              setErrors({});
-              setForm(defaultForm);
-            }}
+            onClick={() => { setOpen(false); setErrors({}); resetForm(); }}
             sx={{
               borderRadius: 2,
               textTransform: 'none',
               fontWeight: 500,
               color: '#64748b',
-              '&:hover': {
-                backgroundColor: '#f1f5f9',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-              },
+              '&:hover': { backgroundColor: '#f1f5f9', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)' },
             }}
           >
             Cancel
@@ -374,10 +509,7 @@ export default function TransactionTypeManagement() {
               backgroundColor: '#2196f3',
               boxShadow: '0 4px 12px rgba(33, 150, 243, 0.4)',
               transition: 'all 0.3s ease',
-              '&:hover': {
-                backgroundColor: '#1976d2',
-                boxShadow: '0 6px 16px rgba(33, 150, 243, 0.5)',
-              },
+              '&:hover': { backgroundColor: '#1976d2', boxShadow: '0 6px 16px rgba(33, 150, 243, 0.5)' },
             }}
           >
             {isEditMode ? 'Update' : 'Save'}
@@ -397,12 +529,16 @@ export default function TransactionTypeManagement() {
                   <TableCell><strong>Name</strong></TableCell>
                   <TableCell><strong>Direction</strong></TableCell>
                   <TableCell><strong>GST</strong></TableCell>
+                  <TableCell><strong>Margin</strong></TableCell>
                   <TableCell><strong>Remarks</strong></TableCell>
-                  <TableCell align="center"><strong>Actions</strong></TableCell>
+                  {CAN_EDIT && (
+                    <TableCell align="center"><strong>Actions</strong></TableCell>
+                  )}
                 </TableRow>
               </TableHead>
+
               <TableBody>
-                {filteredTransactionTypes.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage).map((t, index) => (
+                {pagedRows.map((t, index) => (
                   <TableRow
                     key={t.transaction_type_id || index}
                     sx={{
@@ -413,7 +549,7 @@ export default function TransactionTypeManagement() {
                       }
                     }}
                   >
-                    <TableCell>{page * rowsPerPage + index + 1}</TableCell>
+                    <TableCell>{(rowsPerPage > 0 ? page * rowsPerPage : 0) + index + 1}</TableCell>
                     <TableCell>{t.company_name}</TableCell>
                     <TableCell>{t.cost_centre_name}</TableCell>
                     <TableCell>{t.name}</TableCell>
@@ -421,28 +557,38 @@ export default function TransactionTypeManagement() {
                     <TableCell>
                       <Chip label={t.gst_applicable ? 'Yes' : 'No'} color={t.gst_applicable ? 'success' : 'error'} size="small" />
                     </TableCell>
-                    <TableCell>{t.remarks}</TableCell>
-                    <TableCell align="center">
-                      <Tooltip title="Edit">
-                        <IconButton color="primary" onClick={() => openEditDialog(t)}>
-                          <Edit />
-                        </IconButton>
-                      </Tooltip>
-                      {/* <Tooltip title="Delete">
-                        <IconButton color="error" onClick={() => deleteTransactionType(t.transaction_type_id)}>
-                          <Delete />
-                        </IconButton>
-                      </Tooltip> */}
+                    <TableCell>
+                      <Chip label={t.margin_applicable ? 'Yes' : 'No'} color={t.margin_applicable ? 'success' : 'default'} size="small" />
                     </TableCell>
+                    <TableCell>{t.remarks}</TableCell>
+                    {CAN_EDIT && (
+                      <TableCell align="center">
+                        <Tooltip title="Edit">
+                          <span>
+                            <IconButton color="primary" onClick={() => openEditDialog(t)} disabled={!CAN_EDIT}>
+                              <Edit />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        {/* Keep delete hidden for now
+                        <Tooltip title="Delete">
+                          <IconButton color="error" onClick={() => deleteTransactionType(t.transaction_type_id)}>
+                            <Delete />
+                          </IconButton>
+                        </Tooltip> */}
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
+
                 {filteredTransactionTypes.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={9} align="center">No data found</TableCell>
+                    <TableCell colSpan={CAN_EDIT ? 9 : 8} align="center">No data found</TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
+
             <TablePagination
               component="div"
               count={filteredTransactionTypes.length}
@@ -460,7 +606,7 @@ export default function TransactionTypeManagement() {
         open={snackbar.open}
         autoHideDuration={4000}
         onClose={() => setSnackbar({ ...snackbar, open: false })}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
       >
         <Alert
           onClose={() => setSnackbar({ ...snackbar, open: false })}

@@ -1,0 +1,140 @@
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
+from .models import User
+from companies.models import Company
+
+
+class CompanySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Company
+        fields = ["id", "name"]
+
+
+class UserSerializer(serializers.ModelSerializer):
+    companies = CompanySerializer(many=True, read_only=True)
+    company_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.all(),
+        many=True,
+        write_only=True,
+        source="companies",
+        required=False,
+    )
+    # Not required by default; enforced in validate() for create
+    password = serializers.CharField(write_only=True, required=False)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "user_id",
+            "full_name",
+            "password",
+            "role",
+            "companies",
+            "company_ids",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "is_deleted",
+            "created_at",
+        ]
+        read_only_fields = ["is_deleted", "created_at"]
+
+    # ---- validation to handle role/company/password rules ----
+    def validate(self, attrs):
+        # Determine the role we're validating against (incoming or existing)
+        role = attrs.get("role", getattr(self.instance, "role", None))
+
+        # On create, password is required
+        is_create = self.instance is None
+        if is_create and not attrs.get("password"):
+            raise ValidationError({"password": "Password is required."})
+
+        # `company_ids` was mapped to 'companies' via source='companies'
+        companies = attrs.get("companies", None)
+
+        if role == "SUPER_USER":
+            # SUPER_USER: ignore any companies assignment sent from client
+            if "companies" in attrs:
+                attrs.pop("companies", None)
+        else:
+            # For non-super roles, require at least one company on create,
+            # or when companies are explicitly provided on update.
+            if is_create:
+                if not companies:
+                    raise ValidationError(
+                        {"company_ids": "At least one company is required for this role."}
+                    )
+            else:
+                if "companies" in attrs and not companies:
+                    raise ValidationError(
+                        {"company_ids": "At least one company is required for this role."}
+                    )
+
+        return attrs
+
+    def create(self, validated_data):
+        companies = validated_data.pop("companies", [])
+        password = validated_data.pop("password")  # validated in validate()
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        if companies:
+            user.companies.set(companies)
+        return user
+
+    def update(self, instance, validated_data):
+        companies = validated_data.pop("companies", None)
+        password = validated_data.pop("password", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+
+        # Only update companies if provided (and not SUPER_USER, which we popped in validate)
+        if companies is not None:
+            instance.companies.set(companies)
+
+        return instance
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username_field = "user_id"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Allow alternative identifiers without failing field-level validation
+        self.fields[self.username_field].required = False
+        self.fields["username"] = serializers.CharField(required=False, allow_blank=True)
+        # IMPORTANT: CharField so "igen" in an `email` field won't fail validation
+        self.fields["email"] = serializers.CharField(required=False, allow_blank=True)
+
+    def _coerce_credentials(self):
+        """
+        Accept {user_id|username|email, password} and return
+        {user_id, password} for the parent class to validate.
+        """
+        incoming = dict(self.initial_data or {})
+
+        # 1) provided user_id?
+        candidate = (incoming.get("user_id") or "").strip()
+
+        # 2) provided username?
+        if not candidate and incoming.get("username"):
+            candidate = (incoming["username"] or "").strip()
+
+        # 3) provided email? -> may actually be user_id/username
+        if not candidate and "email" in incoming:
+            raw = (incoming.get("email") or "").strip()
+            if raw:
+                if "@" in raw:
+                    # Looks like a real email: resolve to unique user_id if possible
+                    qs = User.objects.filter(email__iexact=raw)
+                    if qs.count() == 1:
+                        candidate = qs.first().user_i

@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+// src/modules/Dashboard/Dashboard.js
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import API from '../../api/axios';
-import { Line, Pie, Bar } from 'react-chartjs-2';
+import { Line, Pie /*, Bar*/ } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   LineElement,
@@ -18,19 +19,30 @@ import {
   FaUsers, FaBuilding, FaProjectDiagram, FaHome, FaCubes, FaAddressBook,
   FaDollarSign, FaUniversity, FaStore, FaTags, FaSyncAlt, FaExclamationTriangle, FaTimes
 } from 'react-icons/fa';
-import ReactTooltip from 'react-tooltip'; // <-- v4 default export
+import ReactTooltip from 'react-tooltip';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 
 ChartJS.register(LineElement, CategoryScale, LinearScale, PointElement, ArcElement, Filler, BarElement, Tooltip, Legend);
 
-// helper to make safe tooltip ids
-const tid = (s) => String(s || '')
-  .toLowerCase()
-  .replace(/\s+/g, '-')
-  .replace(/[^a-z0-9_-]/g, '');
+// ---- helpers ----
+const tid = (s) => String(s || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');
+const getUserRole = () => {
+  const r = localStorage.getItem('role');
+  if (r) return r;
+  const token = localStorage.getItem('access');
+  if (token && token.split('.').length === 3) {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.role || '';
+    } catch {}
+  }
+  return '';
+};
 
 function Dashboard() {
+  const role = getUserRole();
+
   const [stats, setStats] = useState({});
   const [trend, setTrend] = useState([]);
   const [spendData, setSpendData] = useState([]);
@@ -47,6 +59,22 @@ function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // ---- role-based visibility map ----
+  const visibleStatKeys = useMemo(() => {
+    switch (role) {
+      case 'SUPER_USER':
+        return ['Users','Companies','Projects','Properties','Assets','Contacts','Cost Centres','Banks','Vendors','Transaction Types'];
+      case 'CENTER_HEAD':
+        return ['Projects','Properties','Assets','Contacts','Cost Centres','Banks','Vendors','Transaction Types'];
+      case 'ACCOUNTANT':
+        return ['Projects','Properties','Contacts','Cost Centres','Banks','Vendors','Transaction Types','Assets'];
+      case 'PROPERTY_MANAGER':
+        return ['Projects','Properties','Contacts','Vendors','Assets'];
+      default:
+        return [];
+    }
+  }, [role]);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -61,10 +89,9 @@ function Dashboard() {
       });
 
       const spendRes = await API.get('spend-by-cost-centre/');
-      setSpendData(Array.isArray(spendRes.data) ? spendRes.data : []);
-      setCostCentres((Array.isArray(spendRes.data) ? spendRes.data : [])
-        .map(item => item.cost_centre)
-        .filter(Boolean));
+      const spendArr = Array.isArray(spendRes.data) ? spendRes.data : [];
+      setSpendData(spendArr);
+      setCostCentres(spendArr.map(item => item.cost_centre).filter(Boolean));
 
       const vendorRes = await API.get('top-vendors-by-spend/');
       setVendorData(Array.isArray(vendorRes.data) ? vendorRes.data : []);
@@ -80,9 +107,7 @@ function Dashboard() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const resetFilters = () => {
     setSearch('');
@@ -105,70 +130,47 @@ function Dashboard() {
 
   const chartData = {
     labels: filteredTrend.length > 0 ? filteredTrend.map(item => item.date || 'Unknown') : ['No Data'],
-    datasets: [
-      {
-        label: 'Classified Transactions',
-        data: filteredTrend.length > 0 ? filteredTrend.map(item => item.classified_count || 0) : [0],
-        borderColor: '#4F46E5',
-        backgroundColor: (context) => {
-          const ctx = context.chart.ctx;
-          const gradient = ctx.createLinearGradient(0, 0, 0, 400);
-          gradient.addColorStop(0, 'rgba(79, 70, 229, 0.3)');
-          gradient.addColorStop(1, 'rgba(79, 70, 229, 0.05)');
-          return gradient;
-        },
-        fill: true,
-        tension: 0.4,
-        pointRadius: 4,
-        pointHoverRadius: 6,
-        pointBackgroundColor: '#ffffff',
-        pointBorderColor: '#4F46E5',
-        pointBorderWidth: 2,
+    datasets: [{
+      label: 'Classified Transactions',
+      data: filteredTrend.length > 0 ? filteredTrend.map(item => item.classified_count || 0) : [0],
+      borderColor: '#4F46E5',
+      backgroundColor: (context) => {
+        const ctx = context.chart.ctx;
+        const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(79, 70, 229, 0.3)');
+        gradient.addColorStop(1, 'rgba(79, 70, 229, 0.05)');
+        return gradient;
       },
-    ],
+      fill: true,
+      tension: 0.4,
+      pointRadius: 4,
+      pointHoverRadius: 6,
+      pointBackgroundColor: '#ffffff',
+      pointBorderColor: '#4F46E5',
+      pointBorderWidth: 2,
+    }],
   };
 
   const pieData = {
     labels: filteredSpendData.length > 0 ? filteredSpendData.map(item => item.cost_centre || 'Unknown') : ['No Data'],
-    datasets: [
-      {
-        label: 'Spend by Cost Centre',
-        data: filteredSpendData.length > 0 ? filteredSpendData.map(item => item.total || 0) : [0],
-        backgroundColor: ['#4F46E5', '#EC4899', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#F43F5E', '#06B6D4'],
-        borderColor: '#ffffff',
-        borderWidth: 2,
-        hoverOffset: 20,
-      },
-    ],
-  };
-
-  const vendorChartData = {
-    labels: vendorData.length > 0 ? vendorData.map(item => item.vendor_name || 'Unknown') : ['No Data'],
-    datasets: [
-      {
-        label: 'Spend by Vendor',
-        data: vendorData.length > 0 ? vendorData.map(item => item.total_spend || 0) : [0],
-        backgroundColor: '#4F46E5',
-        borderColor: '#4F46E5',
-        borderWidth: 1,
-        hoverBackgroundColor: '#4338CA',
-        borderRadius: 6,
-      },
-    ],
+    datasets: [{
+      label: 'Spend by Cost Centre',
+      data: filteredSpendData.length > 0 ? filteredSpendData.map(item => item.total || 0) : [0],
+      backgroundColor: ['#4F46E5', '#EC4899', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#F43F5E', '#06B6D4'],
+      borderColor: '#ffffff',
+      borderWidth: 2,
+      hoverOffset: 20,
+    }],
   };
 
   const chartOptions = {
     plugins: {
-      legend: { position: 'bottom', labels: { font: { size: 13, family: 'Inter', weight: '500' }, padding: 20, color: '#1F2937', usePointStyle: true, pointStyle: 'circle' } },
+      legend: { position: 'bottom', labels: { font: { size: 13, family: 'Inter', weight: '500' }, padding: 20, color: '#1F2937', usePointStyle: true } },
       tooltip: {
         backgroundColor: 'rgba(17, 24, 39, 0.95)',
         titleFont: { size: 14, family: 'Inter', weight: '600' },
         bodyFont: { size: 13, family: 'Inter' },
-        padding: 12,
-        cornerRadius: 8,
-        boxPadding: 6,
-        borderWidth: 1,
-        borderColor: 'rgba(79, 70, 229, 0.2)',
+        padding: 12, cornerRadius: 8, boxPadding: 6, borderWidth: 1, borderColor: 'rgba(79, 70, 229, 0.2)',
       },
     },
     scales: {
@@ -180,20 +182,17 @@ function Dashboard() {
     },
     elements: { line: { borderWidth: 3 }, point: { hitRadius: 8 } },
     interaction: { mode: 'index', intersect: false },
-    maintainAspectRatio: false,
-    responsive: true,
+    maintainAspectRatio: false, responsive: true,
   };
 
   const pieOptions = {
     plugins: {
-      legend: { position: 'bottom', labels: { font: { size: 13, family: 'Inter', weight: '500' }, padding: 20, color: '#1F2937', usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 } },
+      legend: { position: 'bottom', labels: { font: { size: 13, family: 'Inter', weight: '500' }, padding: 20, color: '#1F2937', usePointStyle: true, boxWidth: 8, boxHeight: 8 } },
       tooltip: {
         backgroundColor: 'rgba(17, 24, 39, 0.95)',
         titleFont: { size: 14, family: 'Inter', weight: '600' },
         bodyFont: { size: 13, family: 'Inter' },
-        padding: 12,
-        cornerRadius: 8,
-        boxPadding: 6,
+        padding: 12, cornerRadius: 8, boxPadding: 6,
         callbacks: {
           label: context => {
             const label = context.label || '';
@@ -206,33 +205,7 @@ function Dashboard() {
       },
     },
     elements: { arc: { borderWidth: 2, borderRadius: 6 } },
-    cutout: '70%',
-    maintainAspectRatio: false,
-    responsive: true,
-  };
-
-  const vendorChartOptions = {
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: 'rgba(17, 24, 39, 0.95)',
-        titleFont: { size: 14, family: 'Inter', weight: '600' },
-        bodyFont: { size: 13, family: 'Inter' },
-        padding: 12,
-        cornerRadius: 8,
-        boxPadding: 6,
-        callbacks: { label: context => `${context.label}: $${context.parsed.y.toLocaleString()}` },
-      },
-    },
-    scales: {
-      x: { grid: { display: false }, ticks: { color: '#6B7280', font: { family: 'Inter', size: 12 }, padding: 10, maxRotation: 45, minRotation: 45 } },
-      y: {
-        grid: { color: 'rgba(209, 213, 219, 0.3)', borderDash: [4, 4], drawBorder: false },
-        ticks: { color: '#6B7280', font: { family: 'Inter', size: 12 }, padding: 10, beginAtZero: true, callback: value => `$${value.toLocaleString()}` },
-      },
-    },
-    maintainAspectRatio: false,
-    responsive: true,
+    cutout: '70%', maintainAspectRatio: false, responsive: true,
   };
 
   const statIcons = {
@@ -248,21 +221,27 @@ function Dashboard() {
     'Transaction Types': <FaTags />,
   };
 
-  const maxStatValue = Math.max(
-    ...Object.values({
-      Users: stats.total_users || 0,
-      Companies: stats.total_companies || 0,
-      Projects: stats.total_projects || 0,
-      Properties: stats.total_properties || 0,
-      Assets: stats.total_assets || 0,
-      Contacts: stats.total_contacts || 0,
-      'Cost Centres': stats.total_cost_centres || 0,
-      Banks: stats.total_banks || 0,
-      Vendors: stats.total_vendors || 0,
-      'Transaction Types': stats.total_transaction_types || 0,
-    }),
-    100
-  );
+  // Build the source set of all stats, then filter by visibleStatKeys (role)
+  const allStats = useMemo(() => ({
+    Users: stats.total_users,
+    Companies: stats.total_companies,
+    Projects: stats.total_projects,
+    Properties: stats.total_properties,
+    Assets: stats.total_assets,
+    Contacts: stats.total_contacts,
+    'Cost Centres': stats.total_cost_centres,
+    Banks: stats.total_banks,
+    Vendors: stats.total_vendors,
+    'Transaction Types': stats.total_transaction_types,
+  }), [stats]);
+
+  const roleStats = useMemo(() => {
+    const out = {};
+    for (const k of visibleStatKeys) out[k] = allStats[k] ?? 0;
+    return out;
+  }, [visibleStatKeys, allStats]);
+
+  const maxStatValue = Math.max(...Object.values(roleStats).map(v => v || 0), 100);
 
   const RadialProgress = ({ value, label, icon }) => {
     const percentage = Math.min((value / maxStatValue) * 100, 100);
@@ -270,8 +249,8 @@ function Dashboard() {
     return (
       <>
         <motion.div
-          data-tip={`${label}: ${value ?? 0}`}     // v4 trigger content
-          data-for={id}                            // v4 link to tooltip
+          data-tip={`${label}: ${value ?? 0}`}
+          data-for={id}
           whileHover={{ scale: 1.03, boxShadow: '0 10px 20px rgba(0,0,0,0.1)' }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -309,12 +288,8 @@ function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-50 p-6 lg:p-8 font-inter">
       <header className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-8 gap-4">
-        <motion.h1
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="text-3xl lg:text-4xl font-bold text-gray-800"
-        >
+        <motion.h1 initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
+          className="text-3xl lg:text-4xl font-bold text-gray-800">
           Financial Analytics Dashboard
         </motion.h1>
         <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
@@ -353,73 +328,53 @@ function Dashboard() {
               aria-label="Select end date"
             />
           </div>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={fetchData}
-            disabled={loading}
+          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+            onClick={fetchData} disabled={loading}
             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400 transition"
-            aria-label={loading ? 'Loading data' : 'Refresh data'}
-          >
+            aria-label={loading ? 'Loading data' : 'Refresh data'}>
             <FaSyncAlt className={loading ? 'animate-spin' : ''} />
             {loading ? 'Loading...' : 'Refresh'}
           </motion.button>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
             onClick={resetFilters}
             className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg shadow-sm hover:bg-gray-300 transition"
-            aria-label="Reset filters"
-          >
-            <FaTimes />
-            Reset
+            aria-label="Reset filters">
+            <FaTimes /> Reset
           </motion.button>
         </div>
       </header>
 
       <AnimatePresence>
         {error && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg flex items-center gap-2"
-            role="alert"
-          >
-            <FaExclamationTriangle />
-            {error}
+          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
+            className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg flex items-center gap-2" role="alert">
+            <FaExclamationTriangle /> {error}
           </motion.div>
         )}
       </AnimatePresence>
 
+      {/* Simple financial KPIs — keep visible for all roles */}
       <motion.section
         className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, staggerChildren: 0.1 }}
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, staggerChildren: 0.1 }}
       >
         {[
           { label: 'Total Revenue', value: financialMetrics.totalRevenue, color: 'bg-green-50 text-green-700' },
-          // { label: 'Total Expenses', value: financialMetrics.totalExpenses, color: 'bg-red-50 text-red-700' },
-          // { label: 'Budget Utilization', value: financialMetrics.budgetUtilization, suffix: '%' },
+          // If you want to expose more KPIs per role, add role checks here
         ].map(metric => {
           const id = `metric-${tid(metric.label)}`;
-          const display = metric.suffix ? `${metric.value}${metric.suffix}` : `$${metric.value.toLocaleString()}`;
+          const display = `$${(metric.value || 0).toLocaleString()}`;
           return (
             <React.Fragment key={metric.label}>
               <motion.div
-                data-tip={`${metric.label}: ${display}`} // v4 trigger
-                data-for={id}
+                data-tip={`${metric.label}: ${display}`} data-for={id}
                 whileHover={{ scale: 1.03, boxShadow: '0 10px 20px rgba(0,0,0,0.1)' }}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
+                initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
                 className={`p-6 ${metric.color || ''} rounded-xl shadow-sm border border-gray-100 flex flex-col`}
                 aria-label={`${metric.label}: ${display}`}
               >
                 <p className="text-sm font-medium uppercase tracking-wide text-gray-600">{metric.label}</p>
-                <p className="text-2xl font-bold">
-                  {display}
-                </p>
+                <p className="text-2xl font-bold">{display}</p>
               </motion.div>
               <ReactTooltip id={id} place="top" effect="solid" />
             </React.Fragment>
@@ -427,35 +382,19 @@ function Dashboard() {
         })}
       </motion.section>
 
+      {/* Role-based tiles */}
       <motion.section
         className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-8"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, staggerChildren: 0.1 }}
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, staggerChildren: 0.1 }}
       >
-        {Object.entries({
-          Users: stats.total_users,
-          Companies: stats.total_companies,
-          Projects: stats.total_projects,
-          Properties: stats.total_properties,
-          Assets: stats.total_assets,
-          Contacts: stats.total_contacts,
-          'Cost Centres': stats.total_cost_centres,
-          Banks: stats.total_banks,
-          Vendors: stats.total_vendors,
-          'Transaction Types': stats.total_transaction_types,
-        }).map(([label, value]) => (
+        {Object.entries(roleStats).map(([label, value]) => (
           <RadialProgress key={label} value={value ?? 0} label={label} icon={statIcons[label]} />
         ))}
       </motion.section>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <motion.div
-          className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.5 }}
-        >
+        <motion.div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
+          initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.5 }}>
           <h2 className="text-xl font-semibold text-gray-800 mb-4">Transaction Classification Trends</h2>
           <div className="h-80">
             {loading ? (
@@ -473,12 +412,8 @@ function Dashboard() {
           </div>
         </motion.div>
 
-        <motion.div
-          className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.5 }}
-        >
+        <motion.div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
+          initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.5 }}>
           <h2 className="text-xl font-semibold text-gray-800 mb-4">Spend by Cost Centre</h2>
           <div className="h-80 relative">
             {loading ? (

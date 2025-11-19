@@ -5,24 +5,232 @@ import {
   TextField, Card, CardContent, Typography, IconButton,
   Table, TableHead, TableRow, TableCell, TableBody, TableContainer,
   Paper, Tooltip, Snackbar, Alert, Slide, MenuItem, Checkbox, ListItemText,
-  FormControl, FormLabel, RadioGroup, FormControlLabel, Radio,Box
+  FormControl, FormLabel, RadioGroup, FormControlLabel, Radio, Box, Chip, Collapse,
+  InputAdornment
 } from '@mui/material';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
 import DownloadIcon from '@mui/icons-material/Download';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import EventIcon from '@mui/icons-material/Event';
+import FlagIcon from '@mui/icons-material/Flag';
+import NotesIcon from '@mui/icons-material/Notes';
 import BulkUploadDialog from '../../components/BulkUploadDialog';
 import TablePaginationComponent from '../../components/TablePaginationComponent';
 import SearchBar from '../../components/SearchBar';
+import StatusFilter, { statusToIsActive } from '../../components/StatusFilter';
+import { perms } from '../../utils/perm';
 
 const Transition = React.forwardRef(function Transition(props, ref) {
   return <Slide direction="up" ref={ref} {...props} />;
 });
 
+// ---------- Helpers ----------
+const toArray = (d) => {
+  if (Array.isArray(d)) return d;
+  if (Array.isArray(d?.results)) return d.results;
+  if (Array.isArray(d?.items)) return d.items;
+  if (Array.isArray(d?.data)) return d.data;
+  return [];
+};
+
+const compactPayload = (obj, keepEmptyKeys = []) => {
+  const o = { ...obj };
+  Object.keys(o).forEach((k) => {
+    const v = o[k];
+    if (keepEmptyKeys.includes(k)) return;
+    const shouldDelete = v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
+    if (shouldDelete) delete o[k];
+  });
+  return o;
+};
+
+// ---------------------------------------------------------------------------
+// Milestones UI
+// ---------------------------------------------------------------------------
+const statusOptions = ['planned', 'in_progress', 'completed', 'blocked'];
+
+function MilestoneCard({ ms, idx, onChange, onRemove, error }) {
+  return (
+    <Card
+      variant="outlined"
+      sx={{
+        borderRadius: 2,
+        overflow: 'hidden',
+        borderColor: error ? 'error.light' : 'divider',
+        boxShadow: '0 1px 3px rgba(16,24,40,.04)',
+      }}
+    >
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          px: 2,
+          py: 1.5,
+          gap: 1,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          bgcolor: 'grey.50',
+        }}
+      >
+        <FlagIcon fontSize="small" />
+        <Typography variant="subtitle2" sx={{ flex: 1, fontWeight: 700 }}>
+          {ms.name?.trim() || `Milestone ${idx + 1}`}
+        </Typography>
+        <Chip
+          size="small"
+          label={(ms.status || 'planned').replace('_', ' ')}
+          color={
+            ms.status === 'completed'
+              ? 'success'
+              : ms.status === 'in_progress'
+              ? 'primary'
+              : ms.status === 'blocked'
+              ? 'warning'
+              : 'default'
+          }
+          variant="outlined"
+          sx={{ mr: 1 }}
+        />
+        <Tooltip title="Remove milestone">
+          <IconButton color="error" size="small" onClick={onRemove}>
+            <DeleteOutlineIcon />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      <Box sx={{ p: 2 }}>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+            gap: 2,
+            mb: 2,
+          }}
+        >
+          <TextField
+            size="small"
+            label="Name"
+            value={ms.name || ''}
+            onChange={(e) => onChange({ ...ms, name: e.target.value })}
+            fullWidth
+          />
+
+          <TextField
+            size="small"
+            select
+            label="Status"
+            value={ms.status || 'planned'}
+            onChange={(e) => onChange({ ...ms, status: e.target.value })}
+            fullWidth
+          >
+            {statusOptions.map((s) => (
+              <MenuItem key={s} value={s}>
+                {s.replace('_', ' ')}
+              </MenuItem>
+            ))}
+          </TextField>
+
+          <TextField
+            size="small"
+            type="date"
+            label="Start Date"
+            InputLabelProps={{ shrink: true }}
+            value={ms.start_date || ''}
+            onChange={(e) => onChange({ ...ms, start_date: e.target.value })}
+            fullWidth
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <EventIcon fontSize="small" sx={{ opacity: 0.6 }} />
+                </InputAdornment>
+              ),
+            }}
+          />
+
+          <TextField
+            size="small"
+            type="date"
+            label="End Date"
+            InputLabelProps={{ shrink: true }}
+            value={ms.end_date || ''}
+            onChange={(e) => onChange({ ...ms, end_date: e.target.value })}
+            fullWidth
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <EventIcon fontSize="small" sx={{ opacity: 0.6 }} />
+                </InputAdornment>
+              ),
+            }}
+            error={Boolean(error)}
+            helperText={error || ''}
+          />
+        </Box>
+
+        <TextField
+          size="small"
+          label="Notes"
+          value={ms.notes || ''}
+          onChange={(e) => onChange({ ...ms, notes: e.target.value })}
+          fullWidth
+          multiline
+          rows={2}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <NotesIcon fontSize="small" sx={{ opacity: 0.6 }} />
+              </InputAdornment>
+            ),
+          }}
+        />
+      </Box>
+    </Card>
+  );
+}
+
+function MilestonesSection({ milestones, setMilestones, errors }) {
+  return (
+    <Box sx={{ display: 'grid', gap: 2 }}>
+      {(milestones || []).length === 0 && (
+        <Card variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+          <Typography variant="body2" color="text.secondary">
+            No milestones yet — add your first one below.
+          </Typography>
+        </Card>
+      )}
+
+      {(milestones || []).map((ms, idx) => (
+        <MilestoneCard
+          key={ms.id ?? idx}
+          ms={ms}
+          idx={idx}
+          error={errors?.[`milestone_${idx}`]}
+          onChange={(updated) => {
+            const copy = [...milestones];
+            copy[idx] = updated;
+            setMilestones(copy);
+          }}
+          onRemove={() => {
+            const copy = [...milestones];
+            copy.splice(idx, 1);
+            setMilestones(copy);
+          }}
+        />
+      ))}
+    </Box>
+  );
+}
+
+// ===========================================================================
+
 export default function ProjectManagement() {
   const [projects, setProjects] = useState([]);
   const [contacts, setContacts] = useState([]);
-  const [projectManagers, setProjectManagers] = useState([]);
+  const [projectManagers, setProjectManagers] = useState([]); // Users with role PROPERTY_MANAGER (for mapping)
   const [companies, setCompanies] = useState([]);
   const [open, setOpen] = useState(false);
   const [csvFile, setCsvFile] = useState(null);
@@ -33,6 +241,10 @@ export default function ProjectManagement() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(5);
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [selectedStatus, setSelectedStatus] = useState(''); // '', 'active', 'inactive'
+
+  const canEdit = perms.editProjects();
 
   const [form, setForm] = useState({
     name: '',
@@ -48,25 +260,26 @@ export default function ProjectManagement() {
     state: 'Kerala',
     country: 'India',
     company_id: '',
-    property_manager: '',
-    key_stakeholder: '',
+    property_manager: '',             // User FK (kept for compatibility)
+    property_manager_contact: '',     // NEW: Contact id chosen in dropdown
     project_type: '',
-    is_active: true
+    is_active: true,
+    milestones: [],
   });
 
+  // ---------- Fetch ----------
   useEffect(() => {
     fetchProjects();
     fetchContacts();
     fetchProjectManagers();
     fetchCompanies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fetchCompanies = async () => {
     try {
       const res = await API.get('companies/');
-      const companiesData = Array.isArray(res.data) ? res.data : res.data.results || [];
-      setCompanies(companiesData);
-      console.log('Fetched companies:', companiesData); // Debug log
+      setCompanies(toArray(res.data));
     } catch {
       showSnackbar('Error fetching companies', 'error');
     }
@@ -74,10 +287,11 @@ export default function ProjectManagement() {
 
   const fetchProjects = async () => {
     try {
-      const res = await API.get('projects/');
-      const projectsData = Array.isArray(res.data) ? res.data : res.data.results || [];
-      setProjects(projectsData);
-      console.log('Fetched projects:', projectsData); // Debug log
+      const params = {};
+      const isActive = statusToIsActive(selectedStatus);
+      if (typeof isActive === 'boolean') params.is_active = isActive;
+      const res = await API.get('projects/', { params });
+      setProjects(toArray(res.data));
     } catch {
       showSnackbar('Error fetching projects', 'error');
     }
@@ -85,8 +299,8 @@ export default function ProjectManagement() {
 
   const fetchContacts = async () => {
     try {
-      const res = await API.get('contacts/');
-      setContacts(Array.isArray(res.data) ? res.data : res.data.results || []);
+      const res = await API.get('contacts/contacts/');
+      setContacts(toArray(res.data));
     } catch {
       showSnackbar('Error fetching contacts', 'error');
     }
@@ -95,31 +309,127 @@ export default function ProjectManagement() {
   const fetchProjectManagers = async () => {
     try {
       const res = await API.get('users/?role=PROPERTY_MANAGER');
-      setProjectManagers(Array.isArray(res.data) ? res.data : res.data.results || []);
+      setProjectManagers(toArray(res.data));
     } catch {
       showSnackbar('Error fetching property managers', 'error');
     }
   };
 
+  useEffect(() => {
+    fetchProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStatus]);
+
+  // ---------- Maps ----------
+  const contactLabelById = useMemo(() => {
+    const map = new Map();
+    contacts.forEach((c) => {
+      const id = String(c.id ?? c.contact_id);
+      const label = c.full_name || c.email || `Contact ${id}`;
+      map.set(id, label);
+    });
+    return map;
+  }, [contacts]);
+
+  // Contacts who have stakeholder type "Project Manager"
+  const pmContacts = useMemo(
+    () =>
+      contacts.filter(
+        (c) =>
+          Array.isArray(c?.stakeholder_types) &&
+          c.stakeholder_types.some((t) => String(t).toLowerCase() === 'project manager')
+      ),
+    [contacts]
+  );
+
+  // ---------- UX helpers ----------
+  const showSnackbar = (message, severity = 'success') =>
+    setSnackbar({ open: true, message, severity });
+
+  const stakeholderNames = (p) => {
+    if (!Array.isArray(p.stakeholders) || p.stakeholders.length === 0) return '-';
+    return p.stakeholders
+      .map((s) => {
+        if (s && typeof s === 'object') {
+          return s.full_name || s.name || s.email || `Contact ${s.id ?? s.contact_id ?? ''}`;
+        }
+        const key = String(s);
+        return contactLabelById.get(key) || `Contact ${key}`;
+      })
+      .join(', ');
+  };
+
+  const milestonesCount = (p) =>
+    Array.isArray(p.milestones) ? p.milestones.length : p.milestones_count || p.milestone_count || 0;
+
+  // Lazy-load details
+  const handleToggleExpand = async (project) => {
+    const id = project.id;
+    setExpandedRow((cur) => (cur === id ? null : id));
+
+    const hasMilestonesArray = Array.isArray(project.milestones);
+    const hasAny = hasMilestonesArray ? project.milestones.length > 0 : false;
+
+    if (!hasMilestonesArray || (!hasAny && (project.milestones_count > 0 || project.milestone_count > 0))) {
+      try {
+        const res = await API.get(`projects/${id}/`);
+        const fresh = res.data || {};
+        setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...fresh } : p)));
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  // ---------- Create/Update ----------
   const handleAddOrUpdateProject = async () => {
     const errors = {};
-
     if (!form.name?.trim()) errors.name = 'Project name is required';
     if (!form.start_date) errors.start_date = 'Start date is required';
     if (!form.company_id) errors.company_id = 'Company is required';
     if (!form.project_type) errors.project_type = 'Project type is required';
     if (!form.project_status) errors.project_status = 'Project status is required';
-    if (!form.property_manager) errors.property_manager = 'Property manager is required';
     if (typeof form.is_active !== 'boolean') errors.is_active = 'Status must be Active or Inactive';
 
-    setValidationErrors(errors);
+    (form.milestones || []).forEach((m, idx) => {
+      if (m.start_date && m.end_date && m.start_date > m.end_date) {
+        errors[`milestone_${idx}`] = 'Milestone end date must be after start date';
+      }
+    });
 
+    setValidationErrors(errors);
     if (Object.keys(errors).length > 0) {
       showSnackbar('Please correct the highlighted fields', 'warning');
       return;
     }
 
-    const payload = {
+    const companyId = form.company_id === '' || form.company_id == null ? null : Number(form.company_id);
+
+    // Ensure the selected PM contact is part of stakeholders
+    const stakeholderIdsSet = new Set((form.stakeholders || []).map((x) => String(x)));
+    if (form.property_manager_contact) stakeholderIdsSet.add(String(form.property_manager_contact));
+    const stakeholderIds = Array.from(stakeholderIdsSet)
+      .map((id) => Number(id))
+      .filter((n) => !Number.isNaN(n));
+
+    // Map PM contact -> User (role PROPERTY_MANAGER) by matching email
+    let propertyManagerId = null;
+    if (form.property_manager_contact) {
+      const pmContact = contacts.find(
+        (c) => String(c.id ?? c.contact_id) === String(form.property_manager_contact)
+      );
+      const email = (pmContact?.email || '').trim().toLowerCase();
+      if (email) {
+        const matchUser = projectManagers.find(
+          (u) =>
+            (u?.email || '').trim().toLowerCase() === email &&
+            String(u?.role || '').toUpperCase() === 'PROPERTY_MANAGER'
+        );
+        if (matchUser) propertyManagerId = matchUser.id;
+      }
+    }
+
+    let payload = {
       name: form.name,
       start_date: form.start_date,
       end_date: form.end_date || null,
@@ -132,12 +442,20 @@ export default function ProjectManagement() {
       district: form.district || '',
       state: form.state || '',
       country: form.country || '',
-      company: form.company_id || null,
-      stakeholder_ids: form.stakeholders.filter(Boolean),
-      property_manager_id: form.property_manager || null,
-      key_stakeholder_id: form.key_stakeholder || null,
-      is_active: form.is_active
+      company: companyId,
+      stakeholder_ids: stakeholderIds,
+      property_manager_id: propertyManagerId, // may be null if no matching user
+      is_active: form.is_active,
+      milestones: (form.milestones || []).map((m) => ({
+        name: m.name || '',
+        start_date: m.start_date || '',
+        end_date: m.end_date || null,
+        status: m.status || 'planned',
+        notes: m.notes || '',
+      })),
     };
+
+    payload = compactPayload(payload, ['stakeholder_ids', 'milestones']);
 
     try {
       if (editingId) {
@@ -147,40 +465,47 @@ export default function ProjectManagement() {
         await API.post('projects/', payload);
         showSnackbar('Project added');
       }
-
       fetchProjects();
       setOpen(false);
       setEditingId(null);
       resetForm();
     } catch (err) {
-      console.error("Failed to save project:", err?.response?.data || err.message);
-      showSnackbar(err?.response?.data?.detail || 'Failed to save project', 'error');
+      const serverErr = err?.response?.data;
+      if (serverErr && typeof serverErr === 'object') {
+        const firstKey = Object.keys(serverErr)[0];
+        const firstMsg = Array.isArray(serverErr[firstKey]) ? serverErr[firstKey][0] : String(serverErr[firstKey]);
+        showSnackbar(`${firstKey}: ${firstMsg}`, 'error');
+      } else {
+        showSnackbar('Failed to save project', 'error');
+      }
     }
   };
 
-  const resetForm = () => setForm({
-    name: '',
-    start_date: '',
-    end_date: '',
-    stakeholders: [],
-    expected_return: '',
-    project_status: 'proposed',
-    landmark: '',
-    pincode: '',
-    city: '',
-    district: '',
-    state: 'Kerala',
-    country: 'India',
-    company_id: '',
-    property_manager: '',
-    key_stakeholder: '',
-    project_type: '',
-    is_active: true
-  });
+  const resetForm = () =>
+    setForm({
+      name: '',
+      start_date: '',
+      end_date: '',
+      stakeholders: [],
+      expected_return: '',
+      project_status: 'proposed',
+      landmark: '',
+      pincode: '',
+      city: '',
+      district: '',
+      state: 'Kerala',
+      country: 'India',
+      company_id: '',
+      property_manager: '',
+      property_manager_contact: '',
+      project_type: '',
+      is_active: true,
+      milestones: [],
+    });
 
   const handleEdit = (project) => {
-    console.log('Editing project:', project); // Debug log
-    const companyId = project.company || project.company?.id || project.company_id || project.companyId || project.company_ref || '';
+    const companyId =
+      project.company || project.company?.id || project.company_id || project.companyId || project.company_ref || '';
     if (!companies.length) {
       showSnackbar('Companies not loaded yet, please try again', 'warning');
       return;
@@ -189,18 +514,42 @@ export default function ProjectManagement() {
       showSnackbar('No company associated with this project. Please assign a company in the backend.', 'error');
       return;
     }
+
+    // Prefill PM contact from stakeholders (type = Project Manager)
+    const pmStakeholder =
+      Array.isArray(project.stakeholders)
+        ? project.stakeholders.find(
+            (c) =>
+              Array.isArray(c?.stakeholder_types) &&
+              c.stakeholder_types.some((t) => String(t).toLowerCase() === 'project manager')
+          )
+        : null;
+
     setForm({
       ...project,
       company_id: companyId,
       property_manager: project.property_manager?.id ?? '',
-      key_stakeholder: project.key_stakeholder?.contact_id ?? '',
-      stakeholders: Array.isArray(project.stakeholders) ? project.stakeholders.map(s => s.contact_id ?? '') : [],
-      is_active: project.is_active ?? true
+      property_manager_contact: pmStakeholder ? String(pmStakeholder.id ?? pmStakeholder.contact_id) : '',
+      stakeholders: Array.isArray(project.stakeholders)
+        ? project.stakeholders.map((s) => (typeof s === 'object' ? (s.id ?? s.contact_id ?? '') : s))
+        : [],
+      is_active: project.is_active ?? true,
+      milestones: Array.isArray(project.milestones)
+        ? project.milestones.map((ms) => ({
+            id: ms.id,
+            name: ms.name || '',
+            start_date: ms.start_date || '',
+            end_date: ms.end_date || '',
+            status: ms.status || 'planned',
+            notes: ms.notes || '',
+          }))
+        : [],
     });
     setEditingId(project.id);
     setOpen(true);
   };
 
+  // ---------- CSV ----------
   const handleFileChange = (e) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile && selectedFile.size <= 10 * 1024 * 1024) {
@@ -215,34 +564,20 @@ export default function ProjectManagement() {
     const formData = new FormData();
     formData.append('file', csvFile);
     try {
-      await API.post('projects/bulk_upload/', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      await API.post('projects/bulk_upload/', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       showSnackbar('Bulk upload successful');
       fetchProjects();
       setUploadDialogOpen(false);
       setCsvFile(null);
-    } catch (error) {
-      console.error(error);
+    } catch {
       showSnackbar('Bulk upload failed', 'error');
     }
   };
 
-  const showSnackbar = (message, severity = 'success') => {
-    setSnackbar({ open: true, message, severity });
-  };
-
   const handleExportCSV = () => {
     const headers = ['Name', 'Start Date', 'End Date', 'Project Type', 'Expected Return', 'Status'];
-    const rows = projects.map(p => [
-      p.name,
-      p.start_date,
-      p.end_date,
-      p.project_type,
-      p.expected_return,
-      p.project_status
-    ]);
-    const csvContent = [headers, ...rows].map(row => row.join(',')).join('\n');
+    const rows = projects.map((p) => [p.name, p.start_date, p.end_date, p.project_type, p.expected_return, p.project_status]);
+    const csvContent = [headers, ...rows].map((row) => row.join(',')).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -253,9 +588,16 @@ export default function ProjectManagement() {
     document.body.removeChild(link);
   };
 
-  const filteredProjects = useMemo(() => {
-    return projects.filter(p => p.name?.toLowerCase().includes(search.toLowerCase()));
-  }, [search, projects]);
+  // ---------- Derived ----------
+  const filteredProjects = useMemo(
+    () =>
+      projects.filter((p) => {
+        const matchesSearch = p.name?.toLowerCase().includes(search.toLowerCase());
+        const matchesStatus = selectedStatus ? (selectedStatus === 'active' ? !!p.is_active : !p.is_active) : true;
+        return matchesSearch && matchesStatus;
+      }),
+    [search, projects, selectedStatus]
+  );
 
   const paginatedProjects = useMemo(() => {
     const start = page * rowsPerPage;
@@ -264,69 +606,92 @@ export default function ProjectManagement() {
   }, [page, rowsPerPage, filteredProjects]);
 
   const keralaDistricts = [
-    'Thiruvananthapuram', 'Kollam', 'Pathanamthitta', 'Alappuzha', 'Kottayam',
-    'Idukki', 'Ernakulam', 'Thrissur', 'Palakkad', 'Malappuram',
-    'Kozhikode', 'Wayanad', 'Kannur', 'Kasaragod'
+    'Thiruvananthapuram',
+    'Kollam',
+    'Pathanamthitta',
+    'Alappuzha',
+    'Kottayam',
+    'Idukki',
+    'Ernakulam',
+    'Thrissur',
+    'Palakkad',
+    'Malappuram',
+    'Kozhikode',
+    'Wayanad',
+    'Kannur',
+    'Kasaragod',
   ];
 
+  const contactOptions = useMemo(
+    () =>
+      contacts.map((c) => ({
+        id: String(c.id ?? c.contact_id),
+        label: c.full_name || c.email || `Contact ${c.id ?? c.contact_id}`,
+      })),
+    [contacts]
+  );
+
+  // ---------- Render ----------
   return (
     <div className="p-[35px]">
-      <Typography variant="h5" fontWeight={600}>Project Management</Typography>
+      <Typography variant="h5" fontWeight={600}>
+        Project Management
+      </Typography>
 
       <div className="flex justify-between items-center mb-6 mt-6">
-        <SearchBar
-          label="Search Projects"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
         <div className="flex gap-3">
-          <Button
-            variant="outlined"
-            startIcon={<UploadFileIcon />}
-            onClick={() => setUploadDialogOpen(true)}
-            sx={{
-              borderRadius: 2,
-              textTransform: 'none',
-              fontWeight: 500,
-              px: 2,
-              bgcolor: '#e3f2fd',
-              '&:hover': {
-                bgcolor: '#bbdefb',
-              },
-            }}
-          >
-            Bulk Upload
-          </Button>
+          <SearchBar label="Search Projects" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <StatusFilter value={selectedStatus} onChange={(v) => { setSelectedStatus(v); setPage(0); }} />
+        </div>
+
+        <div className="flex gap-3">
           <Button
             variant="outlined"
             startIcon={<DownloadIcon />}
             onClick={handleExportCSV}
-            color='success'
+            color="success"
             sx={{
               borderRadius: 2,
               textTransform: 'none',
               fontWeight: 500,
               px: 2,
               bgcolor: '#e8f5e9',
-              '&:hover': {
-                bgcolor: '#c8e6c9',
-              },
+              '&:hover': { bgcolor: '#c8e6c9' },
             }}
           >
             Export
           </Button>
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            color="primary"
-            onClick={() => {
-              setOpen(true);
-              resetForm();
-              setEditingId(null);
-            }}
-          >
-            Add Project
-          </Button>
+
+          {canEdit && (
+            <>
+              <Button
+                variant="outlined"
+                startIcon={<UploadFileIcon />}
+                onClick={() => setUploadDialogOpen(true)}
+                sx={{
+                  borderRadius: 2,
+                  textTransform: 'none',
+                  fontWeight: 500,
+                  px: 2,
+                  bgcolor: '#e3f2fd',
+                  '&:hover': { bgcolor: '#bbdefb' },
+                }}
+              >
+                Bulk Upload
+              </Button>
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={() => {
+                  setOpen(true);
+                  resetForm();
+                  setEditingId(null);
+                }}
+              >
+                Add Project
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -336,6 +701,7 @@ export default function ProjectManagement() {
             <Table size="small">
               <TableHead sx={{ backgroundColor: '#e3f2fd' }}>
                 <TableRow>
+                  <TableCell />
                   <TableCell>#</TableCell>
                   <TableCell>Name</TableCell>
                   <TableCell>Start Date</TableCell>
@@ -343,56 +709,191 @@ export default function ProjectManagement() {
                   <TableCell>Type</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Manager</TableCell>
-                  <TableCell>Stakeholder</TableCell>
+                  <TableCell>Stakeholders</TableCell>
+                  <TableCell>Milestones</TableCell>
                   <TableCell>City</TableCell>
                   <TableCell>District</TableCell>
                   <TableCell>State</TableCell>
                   <TableCell>Country</TableCell>
-                  <TableCell>Actions</TableCell>
+                  {canEdit && <TableCell>Actions</TableCell>}
                 </TableRow>
               </TableHead>
+
               <TableBody>
-                {paginatedProjects.length > 0 ? paginatedProjects.map((p, i) => (
-                  <TableRow key={p.id} sx={{ backgroundColor: p.is_active ? '#e8f5e9' : '#fffde7' }}>
-                    <TableCell>{page * rowsPerPage + i + 1}</TableCell>
-                    <TableCell>{p.name}</TableCell>
-                    <TableCell>{p.start_date}</TableCell>
-                    <TableCell>{p.end_date || '-'}</TableCell>
-                    <TableCell>{p.project_type || '-'}</TableCell>
-                    <TableCell>{p.project_status}</TableCell>
-                    <TableCell>{p.property_manager?.full_name || p.property_manager?.username || '-'}</TableCell>
-                    <TableCell>{p.key_stakeholder?.full_name || '-'}</TableCell>
-                    <TableCell>{p.city || '-'}</TableCell>
-                    <TableCell>{p.district || '-'}</TableCell>
-                    <TableCell>{p.state || '-'}</TableCell>
-                    <TableCell>{p.country || '-'}</TableCell>
-                    <TableCell>
-                      <Tooltip title="Edit">
-                        <IconButton color='primary' onClick={() => handleEdit(p)}><EditIcon /></IconButton>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                )) : (
+                {paginatedProjects.length > 0 ? (
+                  paginatedProjects.map((p, i) => {
+                    // Prefer PM name from stakeholders (type Project Manager), fallback to user fields
+                    const pmStake = Array.isArray(p.stakeholders)
+                      ? p.stakeholders.find(
+                          (c) =>
+                            Array.isArray(c?.stakeholder_types) &&
+                            c.stakeholder_types.some((t) => String(t).toLowerCase() === 'project manager')
+                        )
+                      : null;
+                    const pmDisplay =
+                      pmStake?.full_name ||
+                      p.property_manager?.full_name ||
+                      [p.property_manager?.first_name, p.property_manager?.last_name].filter(Boolean).join(' ') ||
+                      p.property_manager?.username ||
+                      '-';
+
+                    return (
+                      <React.Fragment key={p.id}>
+                        <TableRow sx={{ backgroundColor: p.is_active ? '#e8f5e9' : '#fffde7' }}>
+                          <TableCell width={36}>
+                            <IconButton size="small" onClick={() => handleToggleExpand(p)}>
+                              {expandedRow === p.id ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}
+                            </IconButton>
+                          </TableCell>
+                          <TableCell>{page * rowsPerPage + i + 1}</TableCell>
+                          <TableCell>{p.name}</TableCell>
+                          <TableCell>{p.start_date}</TableCell>
+                          <TableCell>{p.end_date || '-'}</TableCell>
+                          <TableCell>{p.project_type || '-'}</TableCell>
+                          <TableCell>{p.project_status}</TableCell>
+                          <TableCell>{pmDisplay}</TableCell>
+                          <TableCell
+                            style={{
+                              maxWidth: 240,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {stakeholderNames(p)}
+                          </TableCell>
+                          <TableCell>
+                            {Array.isArray(p.milestones) && p.milestones.length > 0 ? (
+                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, maxWidth: 320 }}>
+                                {p.milestones.slice(0, 3).map((ms) => (
+                                  <Box key={ms.id || `${ms.name}-${ms.start_date}`} sx={{ lineHeight: 1.2 }}>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+                                      {ms.name || 'Untitled'}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary" noWrap>
+                                      {(ms.start_date || '-') + ' → ' + (ms.end_date || '-')}
+                                      {' · '}
+                                      <Chip size="small" label={ms.status || 'planned'} sx={{ ml: 0.5 }} />
+                                    </Typography>
+                                  </Box>
+                                ))}
+                                {p.milestones.length > 3 && (
+                                  <Typography variant="caption" color="text.secondary">
+                                    +{p.milestones.length - 3} more
+                                  </Typography>
+                                )}
+                              </Box>
+                            ) : (
+                              <Chip
+                                size="small"
+                                color="primary"
+                                label={`${milestonesCount(p)} item${milestonesCount(p) === 1 ? '' : 's'}`}
+                                variant="outlined"
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell>{p.city || '-'}</TableCell>
+                          <TableCell>{p.district || '-'}</TableCell>
+                          <TableCell>{p.state || '-'}</TableCell>
+                          <TableCell>{p.country || '-'}</TableCell>
+                          {canEdit && (
+                            <TableCell>
+                              <Tooltip title="Edit">
+                                <IconButton color="primary" onClick={() => handleEdit(p)}>
+                                  <EditIcon />
+                                </IconButton>
+                              </Tooltip>
+                            </TableCell>
+                          )}
+                        </TableRow>
+
+                        {/* Expanded details */}
+                        <TableRow>
+                          <TableCell
+                            colSpan={canEdit ? 15 : 14}
+                            sx={{ p: 0, border: 0, backgroundColor: '#f9fafb' }}
+                          >
+                            <Collapse in={expandedRow === p.id} timeout="auto" unmountOnExit>
+                              <Box sx={{ p: 2 }}>
+                                <Typography
+                                  variant="subtitle2"
+                                  sx={{ mb: 1, color: 'primary.main', fontWeight: 700 }}
+                                >
+                                  Milestones
+                                </Typography>
+                                {Array.isArray(p.milestones) && p.milestones.length > 0 ? (
+                                  <Table size="small" sx={{ mb: 2 }}>
+                                    <TableHead>
+                                      <TableRow>
+                                        <TableCell>Name</TableCell>
+                                        <TableCell>Start</TableCell>
+                                        <TableCell>End</TableCell>
+                                        <TableCell>Status</TableCell>
+                                        <TableCell>Notes</TableCell>
+                                      </TableRow>
+                                    </TableHead>
+                                    <TableBody>
+                                      {p.milestones.map((ms) => (
+                                        <TableRow key={ms.id || `${ms.name}-${ms.start_date}`}>
+                                          <TableCell>{ms.name}</TableCell>
+                                          <TableCell>{ms.start_date || '-'}</TableCell>
+                                          <TableCell>{ms.end_date || '-'}</TableCell>
+                                          <TableCell>{ms.status}</TableCell>
+                                          <TableCell>{ms.notes || '-'}</TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                ) : (
+                                  <Typography sx={{ mb: 2, fontStyle: 'italic', color: 'text.secondary' }}>
+                                    No milestones added
+                                  </Typography>
+                                )}
+
+                                <Typography
+                                  variant="subtitle2"
+                                  sx={{ mb: 1, color: 'primary.main', fontWeight: 700 }}
+                                >
+                                  Address
+                                </Typography>
+                                <Typography sx={{ mb: 1 }}>
+                                  {[p.landmark, p.city, p.district, p.state, p.country]
+                                    .filter(Boolean)
+                                    .join(', ')}
+                                  {p.pincode ? ` - ${p.pincode}` : ''}
+                                </Typography>
+                              </Box>
+                            </Collapse>
+                          </TableCell>
+                        </TableRow>
+                      </React.Fragment>
+                    );
+                  })
+                ) : (
                   <TableRow>
-                    <TableCell colSpan={13} align="center">No projects found</TableCell>
+                    <TableCell colSpan={canEdit ? 15 : 14} align="center">
+                      No projects found
+                    </TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
           </TableContainer>
+
           <TablePaginationComponent
             count={filteredProjects.length}
             page={page}
             rowsPerPage={rowsPerPage}
             onPageChange={(event, newPage) => setPage(newPage)}
             onRowsPerPageChange={(event) => {
-              setRowsPerPage(parseInt(event.target.value, 10));
+              setRowsPerPage(parseInt(event.value, 10));
               setPage(0);
             }}
           />
         </CardContent>
       </Card>
 
+      {/* Add/Edit Dialog */}
       <Dialog
         open={open}
         onClose={() => {
@@ -403,345 +904,350 @@ export default function ProjectManagement() {
         maxWidth="sm"
         fullWidth
         TransitionComponent={Transition}
-        PaperProps={{ sx: { borderRadius: 3, p: 2 } }}
+        PaperProps={{
+          sx: { borderRadius: 4, p: 3, backgroundColor: '#fafafa', boxShadow: 10, overflowY: 'hidden' },
+        }}
       >
         <DialogTitle>{editingId ? 'Edit Project' : 'Add Project'}</DialogTitle>
-        <DialogContent style={{ maxHeight: '70vh', overflowY: 'auto' }}  sx={{
-    maxHeight: '70vh',
-    overflowY: 'auto',
-    scrollbarWidth: 'none', // Firefox
-    '&::-webkit-scrollbar': {
-      display: 'none' // Chrome, Safari
-    }
-  }}>
-              <Typography variant="subtitle1" sx={{ mb: 1 ,color:'primary.main'}}>Project Details</Typography>
-              <Box
-                component="form"
-                noValidate
-                autoComplete="off"
-                sx={{
-                  display: 'grid',
-                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
-                  gap: 2
-                }}
-              >
-          <TextField
-            select
-            label="Company"
-            required
-            fullWidth
-            margin="normal"
-            value={form.company_id || ''}
-            onChange={(e) => {
-              setForm({ ...form, company_id: e.target.value });
-              setValidationErrors({ ...validationErrors, company_id: '' });
-            }}
-            error={!!validationErrors.company_id}
-            helperText={validationErrors.company_id || (form.company_id && !companies.find(c => c.id === form.company_id) ? 'Company not found' : '')}
+        <DialogContent
+          dividers
+          sx={{
+            p: 3,
+            overflowY: 'auto',
+            maxHeight: '70vh',
+            '&::-webkit-scrollbar': { display: 'none' },
+            scrollbarWidth: 'none',
+            '-ms-overflow-style': 'none',
+          }}
+        >
+          <Typography variant="subtitle1" sx={{ mb: 1, color: 'primary.main' }}>
+            Project Details
+          </Typography>
+
+          <Box
+            component="form"
+            noValidate
+            autoComplete="off"
+            sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2 }}
           >
-            <MenuItem value="">Select Company</MenuItem>
-            {companies.map((c) => (
-              <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            label="Name"
-            required
-            fullWidth
-            margin="normal"
-            value={form.name}
-            onChange={(e) => {
-              setForm({ ...form, name: e.target.value });
-              setValidationErrors({ ...validationErrors, name: '' });
-            }}
-            error={!!validationErrors.name}
-            helperText={validationErrors.name}
-          />
-
-          <TextField
-            label="Start Date"
-            type="date"
-            required
-            fullWidth
-            margin="normal"
-            InputLabelProps={{ shrink: true }}
-            value={form.start_date}
-            onChange={(e) => {
-              setForm({ ...form, start_date: e.target.value });
-              setValidationErrors({ ...validationErrors, start_date: '' });
-            }}
-            error={!!validationErrors.start_date}
-            helperText={validationErrors.start_date}
-          />
-
-          <TextField
-            label="End Date"
-            type="date"
-            fullWidth
-            margin="normal"
-            InputLabelProps={{ shrink: true }}
-            value={form.end_date}
-            onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-          />
-
-          <TextField
-            select
-            label="Project Type"
-            required
-            fullWidth
-            margin="normal"
-            value={form.project_type}
-            onChange={(e) => {
-              setForm({ ...form, project_type: e.target.value });
-              setValidationErrors({ ...validationErrors, project_type: '' });
-            }}
-            error={!!validationErrors.project_type}
-            helperText={validationErrors.project_type}
-          >
-            <MenuItem value="">Select Type</MenuItem>
-            {['internal', 'construction', 'interior'].map(type => (
-              <MenuItem key={type} value={type}>{type}</MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            select
-            label="Stakeholders"
-            fullWidth
-            margin="normal"
-            SelectProps={{
-              multiple: true,
-              renderValue: (selected) =>
-                contacts
-                  .filter(c => selected.includes(String(c.contact_id)))
-                  .map(c => c.full_name || c.email)
-                  .join(', ')
-            }}
-            value={form.stakeholders.map(String)}
-            onChange={(e) =>
-              setForm({
-                ...form,
-                stakeholders: e.target.value.map(String)
-              })
-            }
-          >
-            {contacts.map(c => (
-              <MenuItem key={c.contact_id} value={String(c.contact_id)}>
-                <Checkbox checked={form.stakeholders.map(String).includes(String(c.contact_id))} />
-                <ListItemText primary={c.full_name || c.email || `Contact ${c.contact_id}`} />
-              </MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            select
-            label="Property Manager"
-            required
-            fullWidth
-            margin="normal"
-            value={form.property_manager}
-            onChange={(e) => {
-              setForm({ ...form, property_manager: e.target.value });
-              setValidationErrors({ ...validationErrors, property_manager: '' });
-            }}
-            error={!!validationErrors.property_manager}
-            helperText={validationErrors.property_manager}
-          >
-            <MenuItem value="">Select Manager</MenuItem>
-            {projectManagers.map(u => (
-              <MenuItem key={u.id} value={u.id}>{u.full_name || u.username} ({u.email})</MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            select
-            label="Key Stakeholder"
-            fullWidth
-            margin="normal"
-            value={form.key_stakeholder}
-            onChange={(e) => setForm({ ...form, key_stakeholder: e.target.value })}
-          >
-            <MenuItem value="">Select Key Stakeholder</MenuItem>
-            {contacts.map(c => (
-              <MenuItem key={c.contact_id} value={c.contact_id}>
-                {c.full_name || c.email || `Contact ${c.contact_id}`}
-              </MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            select
-            label="Status"
-            required
-            fullWidth
-            margin="normal"
-            value={form.project_status}
-            onChange={(e) => {
-              setForm({ ...form, project_status: e.target.value });
-              setValidationErrors({ ...validationErrors, project_status: '' });
-            }}
-            error={!!validationErrors.project_status}
-            helperText={validationErrors.project_status}
-          >
-            <MenuItem value="">Select Status</MenuItem>
-            <MenuItem value="proposed">Proposed</MenuItem>
-            <MenuItem value="in_progress">In Progress</MenuItem>
-            <MenuItem value="completed">Completed</MenuItem>
-          </TextField>
-
-          <FormControl component="fieldset" margin="normal" sx={{ mt: 2 }}>
-            <FormLabel component="legend">Active Status</FormLabel>
-            <RadioGroup
-              row
-              value={form.is_active}
+            <TextField
+              select
+              label="Company"
+              required
+              fullWidth
+              margin="normal"
+              value={form.company_id || ''}
               onChange={(e) => {
-                console.log('Setting is_active to:', e.target.value === 'true');
-                setForm({ ...form, is_active: e.target.value === 'true' });
-                setValidationErrors({ ...validationErrors, is_active: '' });
+                setForm({ ...form, company_id: e.target.value });
+                setValidationErrors({ ...validationErrors, company_id: '' });
               }}
-              sx={{ gap: 2 }}
+              error={!!validationErrors.company_id}
+              helperText={
+                validationErrors.company_id ||
+                (form.company_id &&
+                !companies.find((c) => String(c.id) === String(form.company_id))
+                  ? 'Company not found'
+                  : '')
+              }
             >
-              <FormControlLabel
-                value={true}
-                control={<Radio sx={{ color: '#4caf50', '&.Mui-checked': { color: '#4caf50' } }} />}
-                label="Active"
-                sx={{ '& .MuiFormControlLabel-label': { color: '#424242' } }}
-              />
-              <FormControlLabel
-                value={false}
-                control={<Radio sx={{ color: '#ff9800', '&.Mui-checked': { color: '#ff9800' } }} />}
-                label="Inactive"
-                sx={{ '& .MuiFormControlLabel-label': { color: '#424242' } }}
-              />
-            </RadioGroup>
-          </FormControl>
-          </Box>
-           <Typography variant="subtitle1" sx={{ mb: 1 ,color:'primary.main'}}>Address Details</Typography>
+              <MenuItem value="">Select Company</MenuItem>
+              {companies.map((c) => (
+                <MenuItem key={c.id} value={c.id}>
+                  {c.name}
+                </MenuItem>
+              ))}
+            </TextField>
 
-      <Box
-                component="form"
-                noValidate
-                autoComplete="off"
-                sx={{
-                  display: 'grid',
-                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
-                  gap: 2
+            <TextField
+              label="Name"
+              required
+              fullWidth
+              margin="normal"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setValidationErrors({ ...validationErrors, name: '' });
+              }}
+              error={!!validationErrors.name}
+              helperText={validationErrors.name || ''}
+            />
+
+            <TextField
+              label="Start Date"
+              type="date"
+              required
+              fullWidth
+              margin="normal"
+              InputLabelProps={{ shrink: true }}
+              value={form.start_date}
+              onChange={(e) => {
+                setForm({ ...form, start_date: e.target.value });
+                setValidationErrors({ ...validationErrors, start_date: '' });
+              }}
+              error={!!validationErrors.start_date}
+              helperText={validationErrors.start_date || ''}
+            />
+
+            <TextField
+              label="End Date"
+              type="date"
+              fullWidth
+              margin="normal"
+              InputLabelProps={{ shrink: true }}
+              value={form.end_date}
+              onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+            />
+
+            {/* ---- Project Type ---- */}
+            <TextField
+              select
+              label="Project Type"
+              required
+              fullWidth
+              margin="normal"
+              value={form.project_type || ''}
+              onChange={(e) => {
+                setForm({ ...form, project_type: e.target.value });
+                setValidationErrors({ ...validationErrors, project_type: '' });
+              }}
+              error={!!validationErrors.project_type}
+              helperText={validationErrors.project_type || ''}
+            >
+              <MenuItem value="">Select Type</MenuItem>
+              {['internal', 'construction', 'interior'].map((type) => (
+                <MenuItem key={type} value={type}>
+                  {type}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <TextField
+              select
+              label="Stakeholders"
+              fullWidth
+              margin="normal"
+              SelectProps={{
+                multiple: true,
+                renderValue: (selected) =>
+                  contactOptions
+                    .filter((c) => selected.map(String).includes(String(c.id)))
+                    .map((c) => c.label)
+                    .join(', '),
+              }}
+              value={form.stakeholders.map(String)}
+              onChange={(e) => setForm({ ...form, stakeholders: e.target.value.map(String) })}
+            >
+              {contactOptions.map((c) => (
+                <MenuItem key={c.id} value={c.id}>
+                  <Checkbox checked={form.stakeholders.map(String).includes(String(c.id))} />
+                  <ListItemText primary={c.label} />
+                </MenuItem>
+              ))}
+            </TextField>
+
+            {/* Property Manager — show CONTACT names (type=Project Manager) */}
+            <TextField
+              select
+              label="Property Manager *"
+              required
+              fullWidth
+              margin="normal"
+              value={form.property_manager_contact || ''}
+              onChange={(e) => {
+                setForm({ ...form, property_manager_contact: e.target.value });
+                setValidationErrors({ ...validationErrors, property_manager: '' });
+              }}
+              error={!!validationErrors.property_manager}
+              helperText={validationErrors.property_manager || ''}
+            >
+              <MenuItem value="">Select Manager</MenuItem>
+              {pmContacts.map((c) => (
+                <MenuItem key={c.id ?? c.contact_id} value={String(c.id ?? c.contact_id)}>
+                  {c.full_name || c.email || `Contact ${c.id ?? c.contact_id}`}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <TextField
+              select
+              label="Status"
+              required
+              fullWidth
+              margin="normal"
+              value={form.project_status || ''}
+              onChange={(e) => {
+                setForm({ ...form, project_status: e.target.value });
+                setValidationErrors({ ...validationErrors, project_status: '' });
+              }}
+              error={!!validationErrors.project_status}
+              helperText={validationErrors.project_status || ''}
+            >
+              <MenuItem value="">Select Status</MenuItem>
+              <MenuItem value="proposed">Proposed</MenuItem>
+              <MenuItem value="in_progress">In Progress</MenuItem>
+              <MenuItem value="completed">Completed</MenuItem>
+            </TextField>
+
+            <FormControl component="fieldset" margin="normal" sx={{ mt: 2 }}>
+              <FormLabel component="legend">Active Status</FormLabel>
+              <RadioGroup
+                row
+                value={String(form.is_active)}
+                onChange={(e) => {
+                  setForm({ ...form, is_active: e.target.value === 'true' });
+                  setValidationErrors({ ...validationErrors, is_active: '' });
                 }}
+                sx={{ gap: 2 }}
               >
-         
-          <TextField
-            label="Landmark"
-            fullWidth
-            margin="normal"
-            value={form.landmark}
-            onChange={(e) => setForm({ ...form, landmark: e.target.value })}
-          />
-
-          <TextField
-            label="Pincode"
-            fullWidth
-            margin="normal"
-            value={form.pincode}
-            onChange={(e) => setForm({ ...form, pincode: e.target.value })}
-          />
-
-          <TextField
-            label="City"
-            fullWidth
-            margin="normal"
-            value={form.city}
-            onChange={(e) => {
-              setForm({ ...form, city: e.target.value });
-              setValidationErrors({ ...validationErrors, city: '' });
-            }}
-            error={!!validationErrors.city}
-            helperText={validationErrors.city}
-          />
-
-          <TextField
-            select
-            label="District"
-            fullWidth
-            margin="normal"
-            value={form.district}
-            onChange={(e) => {
-              setForm({ ...form, district: e.target.value });
-              setValidationErrors({ ...validationErrors, district: '' });
-            }}
-            error={!!validationErrors.district}
-            helperText={validationErrors.district}
-          >
-            <MenuItem value="">Select District</MenuItem>
-            {keralaDistricts.map((d) => (
-              <MenuItem key={d} value={d}>{d}</MenuItem>
-            ))}
-          </TextField>
-
-          <TextField
-            label="State"
-            fullWidth
-            margin="normal"
-            value={form.state}
-            onChange={(e) => {
-              setForm({ ...form, state: e.target.value });
-              setValidationErrors({ ...validationErrors, state: '' });
-            }}
-            error={!!validationErrors.state}
-            helperText={validationErrors.state}
-          />
-
-          <TextField
-            label="Country"
-            fullWidth
-            margin="normal"
-            value={form.country}
-            onChange={(e) => {
-              setForm({ ...form, country: e.target.value });
-              setValidationErrors({ ...validationErrors, country: '' });
-            }}
-            error={!!validationErrors.country}
-            helperText={validationErrors.country}
-          />
+                <FormControlLabel value="true" control={<Radio />} label="Active" />
+                <FormControlLabel value="false" control={<Radio />} label="Inactive" />
+              </RadioGroup>
+            </FormControl>
           </Box>
+
+          <Typography variant="subtitle1" sx={{ mb: 1, mt: 2, color: 'primary.main' }}>
+            Address Details
+          </Typography>
+
+          <Box
+            component="form"
+            noValidate
+            autoComplete="off"
+            sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2 }}
+          >
+            <TextField
+              label="Landmark"
+              fullWidth
+              margin="normal"
+              value={form.landmark}
+              onChange={(e) => setForm({ ...form, landmark: e.target.value })}
+            />
+            <TextField
+              label="Pincode"
+              fullWidth
+              margin="normal"
+              value={form.pincode}
+              onChange={(e) => setForm({ ...form, pincode: e.target.value })}
+            />
+            <TextField
+              label="City"
+              fullWidth
+              margin="normal"
+              value={form.city}
+              onChange={(e) => setForm({ ...form, city: e.target.value })}
+            />
+            <TextField
+              select
+              label="District"
+              fullWidth
+              margin="normal"
+              value={form.district || ''}
+              onChange={(e) => setForm({ ...form, district: e.target.value })}
+            >
+              <MenuItem value="">Select District</MenuItem>
+              {keralaDistricts.map((d) => (
+                <MenuItem key={d} value={d}>
+                  {d}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="State"
+              fullWidth
+              margin="normal"
+              value={form.state}
+              onChange={(e) => setForm({ ...form, state: e.target.value })}
+            />
+            <TextField
+              label="Country"
+              fullWidth
+              margin="normal"
+              value={form.country}
+              onChange={(e) => setForm({ ...form, country: e.target.value })}
+            />
+          </Box>
+
+          {/* ===================== Milestones ===================== */}
+          <Typography variant="subtitle1" sx={{ mb: 1, mt: 3, color: 'primary.main', fontWeight: 700 }}>
+            Milestones
+          </Typography>
+
+          <MilestonesSection
+            milestones={form.milestones}
+            setMilestones={(m) => setForm({ ...form, milestones: m })}
+            errors={validationErrors}
+          />
+
+          <Box sx={{ mt: 2 }}>
+            <Button
+              variant="outlined"
+              startIcon={<AddIcon />}
+              onClick={() =>
+                setForm({
+                  ...form,
+                  milestones: [
+                    ...(form.milestones || []),
+                    { name: '', start_date: '', end_date: '', status: 'planned', notes: '' },
+                  ],
+                })
+              }
+              sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 500 }}
+            >
+              Add Milestone
+            </Button>
+          </Box>
+          {/* =================== End Milestones =================== */}
         </DialogContent>
 
         <DialogActions>
-          <Button onClick={() => {
-            setOpen(false);
-            resetForm();
-            setEditingId(null);
-          }} sx={{
+          <Button
+            onClick={() => {
+              setOpen(false);
+              resetForm();
+              setEditingId(null);
+            }}
+            sx={{
               borderRadius: 2,
               textTransform: 'none',
               fontWeight: 500,
               color: '#64748b',
-              '&:hover': {
-                backgroundColor: '#f1f5f9',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-              },
-            }}>
+              '&:hover': { backgroundColor: '#f1f5f9', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' },
+            }}
+          >
             Cancel
           </Button>
-          <Button variant="contained" onClick={handleAddOrUpdateProject} sx={{
+          <Button
+            variant="contained"
+            onClick={handleAddOrUpdateProject}
+            sx={{
               borderRadius: 2,
               textTransform: 'none',
               fontWeight: 500,
               backgroundColor: '#2196f3',
-              boxShadow: '0 4px 12px rgba(33, 150, 243, 0.4)',
+              boxShadow: '0 4px 12px rgba(33,150,243,0.4)',
               transition: 'all 0.3s ease',
-              '&:hover': {
-                backgroundColor: '#1976d2',
-                boxShadow: '0 6px 16px rgba(33, 150, 243, 0.5)',
-              },
-            }}>
+              '&:hover': { backgroundColor: '#1976d2', boxShadow: '0 6px 16px rgba(33,150,243,0.5)' },
+            }}
+          >
             {editingId ? 'Update' : 'Add'}
           </Button>
         </DialogActions>
       </Dialog>
 
-      <Snackbar open={snackbar.open} autoHideDuration={3000} onClose={() => setSnackbar({ ...snackbar, open: false })}>
-        <Alert severity={snackbar.severity}>{snackbar.message}</Alert>
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={3000}
+        onClose={() => setSnackbar({ ...snackbar, open: false })}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert
+          onClose={() => setSnackbar({ ...snackbar, open: false })}
+          severity={snackbar.severity}
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
+          {snackbar.message}
+        </Alert>
       </Snackbar>
 
       <BulkUploadDialog

@@ -2,6 +2,6 @@ from rest_framework.routers import DefaultRouter
 from .views import ContactViewSet
 
 router = DefaultRouter()
-router.register(r'contacts', ContactViewSet, basename='contacts')
+router.register(r'contacts', ContactViewSet, basename='contacts')  # <-- change here
 
 urlpatterns = router.urls

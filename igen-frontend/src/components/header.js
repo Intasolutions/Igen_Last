@@ -5,7 +5,7 @@ import {
 } from '@mui/material';
 import { styled } from '@mui/material/styles';
 
-import LogoutIcon from '@mui/icons-material/Logout';
+
 
 
 const IconBox = styled(Box)(({ theme }) => ({
@@ -53,7 +53,7 @@ export default function Header({ darkMode, setDarkMode, user = { name: 'Admin', 
   </Box>
 
   {/* Avatar and Menu on the right */}
-  <IconBox>
+  {/* <IconBox>
     <Tooltip title="Account">
       <IconButton onClick={handleAvatarClick}>
         <Avatar src="https://i.pravatar.cc/300" alt="profile" sx={{ width: 40, height: 40 }} />
@@ -81,7 +81,7 @@ export default function Header({ darkMode, setDarkMode, user = { name: 'Admin', 
         Logout
       </MenuItem>
     </Menu>
-  </IconBox>
+  </IconBox> */}
 </Toolbar>
 
     </AppBar>
