@@ -1,9 +1,8 @@
-# analytics/views.py
 from properties.models import Property
 from datetime import date, timedelta
 from decimal import Decimal
-from io import BytesIO  # ← for DOCX response
-from collections import defaultdict  # ← needed by FinancialDashboardPivotView
+from io import BytesIO  # for DOCX response
+from collections import defaultdict  # needed by FinancialDashboardPivotView
 
 from django.apps import apps
 from django.db.models import Sum, Q
@@ -89,7 +88,11 @@ class AnalyticsHealthView(APIView):
 
     def get(self, request):
         # very wide range just to see *something*
-        rows = unified_ledger(request.user, from_date=date(2000, 1, 1), to_date=date(2100, 1, 1))
+        rows = unified_ledger(
+            request.user,
+            from_date=date(2000, 1, 1),
+            to_date=date(2100, 1, 1),
+        )
         return Response({"ok": True, "row_count": len(rows)})
 
 
@@ -203,13 +206,19 @@ class EntityStatementView(APIView):
         entity_id = request.GET.get("entity_id")
         month = request.GET.get("month")  # YYYY-MM
         if not (entity_id and month):
-            return Response({"detail": "entity_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "entity_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         start, end = _month_range(month)
         # Opening balance is strictly before start (exclusive)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
-            request.user, from_date=start, to_date=end, entity_id=int(entity_id)
+            request.user,
+            from_date=start,
+            to_date=end,
+            entity_id=int(entity_id),
         )
         rows = running_balance(base_rows, opening_balance=obal)
 
@@ -234,12 +243,18 @@ class EntityStatementPDFView(APIView):
         entity_id = request.GET.get("entity_id")
         month = request.GET.get("month")
         if not (entity_id and month):
-            return Response({"detail": "entity_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "entity_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
-            request.user, from_date=start, to_date=end, entity_id=int(entity_id)
+            request.user,
+            from_date=start,
+            to_date=end,
+            entity_id=int(entity_id),
         )
         rows = running_balance(base_rows, opening_balance=obal)
 
@@ -275,18 +290,25 @@ class EntityStatementDOCXView(APIView):
     def get(self, request):
         if not _DOCX_OK:
             return Response(
-                {"detail": "Word export unavailable: install python-docx"}, status=500
+                {"detail": "Word export unavailable: install python-docx"},
+                status=500,
             )
 
         entity_id = request.GET.get("entity_id")
         month = request.GET.get("month")
         if not (entity_id and month):
-            return Response({"detail": "entity_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "entity_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
-            request.user, from_date=start, to_date=end, entity_id=int(entity_id)
+            request.user,
+            from_date=start,
+            to_date=end,
+            entity_id=int(entity_id),
         )
         rows = running_balance(base_rows, opening_balance=obal)
 
@@ -319,7 +341,10 @@ class EntityStatementDOCXView(APIView):
         bio.seek(0)
         resp = HttpResponse(
             bio.getvalue(),
-            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -338,12 +363,18 @@ class EntityStatementExcelView(APIView):
         entity_id = request.GET.get("entity_id")
         month = request.GET.get("month")
         if not (entity_id and month):
-            return Response({"detail": "entity_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "entity_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
-            request.user, from_date=start, to_date=end, entity_id=int(entity_id)
+            request.user,
+            from_date=start,
+            to_date=end,
+            entity_id=int(entity_id),
         )
         rows = running_balance(base_rows, opening_balance=obal)
 
@@ -363,7 +394,10 @@ class EntityStatementExcelView(APIView):
         xlsx = export_excel(headers, data)
         resp = HttpResponse(
             xlsx.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -381,10 +415,15 @@ class MIExpensesSummaryView(APIView):
         f = parse_date(request.GET.get("from")) or date(date.today().year, 1, 1)
         t = parse_date(request.GET.get("to")) or date.today()
         rows = unified_ledger(
-            request.user, from_date=f, to_date=t, only_maint_interior=True
+            request.user,
+            from_date=f,
+            to_date=t,
+            only_maint_interior=True,
         )
+        # For spend, treat DEBIT as positive, CREDIT as offset
         total = sum(
-            [(r.get("credit") or 0) - (r.get("debit") or 0) for r in rows], Decimal("0")
+            [(r.get("debit") or 0) - (r.get("credit") or 0) for r in rows],
+            Decimal("0"),
         )
         return Response({"from": str(f), "to": str(t), "ytd_total": str(total)})
 
@@ -396,15 +435,19 @@ class MIExpensesEntitiesView(APIView):
         f = parse_date(request.GET.get("from")) or date(date.today().year, 1, 1)
         t = parse_date(request.GET.get("to")) or date.today()
         rows = unified_ledger(
-            request.user, from_date=f, to_date=t, only_maint_interior=True
+            request.user,
+            from_date=f,
+            to_date=t,
+            only_maint_interior=True,
         )
 
         # group by (entity_id, entity_name)
         agg = {}
         for r in rows:
             key = (r.get("entity_id"), r.get("entity") or "—")
-            agg[key] = agg.get(key, Decimal("0")) + (r.get("credit") or 0) - (
-                r.get("debit") or 0
+            # debit (spend) minus credit (reversals/adjustments)
+            agg[key] = agg.get(key, Decimal("0")) + (r.get("debit") or 0) - (
+                r.get("credit") or 0
             )
 
         data = [{"id": k[0], "entity": k[1], "balance": v} for k, v in agg.items()]
@@ -437,20 +480,26 @@ class MIExpensesExportView(APIView):
         f = parse_date(request.GET.get("from")) or date(date.today().year, 1, 1)
         t = parse_date(request.GET.get("to")) or date.today()
         rows = unified_ledger(
-            request.user, from_date=f, to_date=t, only_maint_interior=True
+            request.user,
+            from_date=f,
+            to_date=t,
+            only_maint_interior=True,
         )
 
         agg = {}
         for r in rows:
             key = r.get("entity") or "—"
-            agg[key] = agg.get(key, Decimal("0")) + (r.get("credit") or 0) - (
-                r.get("debit") or 0
+            agg[key] = agg.get(key, Decimal("0")) + (r.get("debit") or 0) - (
+                r.get("credit") or 0
             )
 
         xlsx = export_excel(["Entity", "Balance"], [[k, v] for k, v in agg.items()])
         resp = HttpResponse(
             xlsx.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -545,8 +594,8 @@ def _synthetic_property_statement_rows(prop: Property, month: str):
     Fallback when unified_ledger returns no rows for a property.
 
     Builds a simple 'contract-based' statement from the Property master:
-      - Rent for the month
-      - iGen Service Charge for the month
+      - Rent for the month (CREDIT)
+      - iGen Service Charge for the month (DEBIT)
 
     This ensures the owner always gets something from the Owner Dashboard,
     even before a full ledger integration is in place.
@@ -567,6 +616,7 @@ def _synthetic_property_statement_rows(prop: Property, month: str):
     rows = []
     balance = Decimal("0")
 
+    # Rent as CREDIT
     if rent:
         balance += rent
         rows.append(
@@ -580,14 +630,15 @@ def _synthetic_property_statement_rows(prop: Property, month: str):
             }
         )
 
+    # Service Charge as DEBIT
     if sc:
-        balance += sc
+        balance -= sc
         rows.append(
             {
                 "value_date": start,
                 "txn_type": "Service Charge",
-                "credit": sc,
-                "debit": Decimal("0"),
+                "credit": Decimal("0"),
+                "debit": sc,
                 "balance": balance,
                 "remarks": f"iGen service charge for {month}",
             }
@@ -860,7 +911,8 @@ class OwnerRentalPropertyPatchView(APIView):
 
         def apply_igen_sc():
             if "igen_service_charge" not in data or not hasattr(
-                prop, "igen_service_charge"
+                prop,
+                "igen_service_charge",
             ):
                 return
             val = clean_number(data.get("igen_service_charge"))
@@ -913,8 +965,7 @@ class OwnerRentalPropertyPatchView(APIView):
                 "status": "ok",
                 "property_fields": list(set(prop_fields_changed)),
                 "flags": flag_fields_changed,
-            },
-            status=status.HTTP_200_OK,
+            },status.HTTP_200_OK,
         )
 
 
@@ -935,7 +986,10 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
         if not (property_id and month):
-            return Response({"detail": "property_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "property_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         try:
             prop = Property.objects.get(pk=int(property_id))
@@ -982,13 +1036,17 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
     def get(self, request):
         if not _DOCX_OK:
             return Response(
-                {"detail": "Word export unavailable: install python-docx"}, status=500
+                {"detail": "Word export unavailable: install python-docx"},
+                status=500,
             )
 
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
         if not (property_id and month):
-            return Response({"detail": "property_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "property_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         try:
             prop = Property.objects.get(pk=int(property_id))
@@ -1029,7 +1087,10 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
         bio.seek(0)
         resp = HttpResponse(
             bio.getvalue(),
-            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -1051,7 +1112,10 @@ class OwnerRentalPropertyStatementExcelView(APIView):
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
         if not (property_id and month):
-            return Response({"detail": "property_id & month (YYYY-MM) required"}, status=400)
+            return Response(
+                {"detail": "property_id & month (YYYY-MM) required"},
+                status=400,
+            )
 
         try:
             prop = Property.objects.get(pk=int(property_id))
@@ -1078,7 +1142,10 @@ class OwnerRentalPropertyStatementExcelView(APIView):
         xlsx = export_excel(headers, data)
         resp = HttpResponse(
             xlsx.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -1112,7 +1179,12 @@ class ProjectProfitabilitySummaryView(APIView):
             a["out"] += r.get("debit") or 0
 
         out = [
-            {"project": k, "inflows": v["in"], "outflows": v["out"], "net": v["in"] - v["out"]}
+            {
+                "project": k,
+                "inflows": v["in"],
+                "outflows": v["out"],
+                "net": v["in"] - v["out"],
+            }
             for k, v in agg.items()
         ]
         out.sort(key=lambda x: x["project"])
@@ -1151,7 +1223,10 @@ class ProjectProfitabilityExportView(APIView):
         )
         resp = HttpResponse(
             xlsx.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
         )
         resp[
             "Content-Disposition"
@@ -1241,7 +1316,10 @@ class FinancialDashboardExportView(APIView):
         xlsx = export_excel(headers, [[r.get(h, "") for h in headers] for r in rows])
         resp = HttpResponse(
             xlsx.read(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
         )
         resp[
             "Content-Disposition"

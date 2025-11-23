@@ -866,29 +866,16 @@ function MI() {
           </div>
         </Toolbar>
 
-        <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="rounded-xl border border-gray-200 p-4">
-            <div className="text-xs text-gray-500">YTD Total</div>
-            <div className="text-xl font-semibold text-gray-900">
-              ₹ {inr(summary?.ytd_total || 0)}
-            </div>
-          </div>
-          <div className="rounded-xl border border-gray-200 p-4">
-            <div className="text-xs text-gray-500">Period</div>
-            <div className="text-sm text-gray-900">
-              {from} → {to}
-            </div>
-          </div>
-          <div className="rounded-xl border border-gray-200 p-4">
-            <div className="text-xs text-gray-500">Entities</div>
-            <div className="text-xl font-semibold text-gray-900">{entities.length}</div>
-          </div>
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+          <Metric title="YTD Spend (M&I)" value={`₹ ${inr(summary?.ytd_total || 0)}`} tone="blue" />
+          <Metric title="Period" value={`${from} → ${to}`} tone="blue" />
+          <Metric title="Entities with M&I" value={entities.length} tone="emerald" />
         </div>
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card title="Entity Balances" subtitle="Click an entity to view transactions">
-          <Table headers={["Entity", "Balance (₹)"]}>
+        <Card title="Entity Spend" subtitle="Click an entity to view transactions">
+          <Table headers={["Entity", "Spend (₹)"]}>
             {loading && (
               <tr>
                 <td className="px-3 py-8 text-gray-500" colSpan={2}>
@@ -993,7 +980,8 @@ function ProjectProfitability() {
 
       const blob = new Blob([res.data], {
         type:
-         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          res.headers?.["content-type"] ||
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
       const url = URL.createObjectURL(blob);
 
@@ -1001,15 +989,17 @@ function ProjectProfitability() {
       const m = cd.match(/filename="?([^"]+)"?/i);
       const filename = m?.[1] || `project_profitability_${from}_${to}.xlsx`;
 
-      const a = document.createElement("a");
+       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
+
       setTimeout(() => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
       }, 150);
+
     } catch (e) {
       console.error(e);
       alert("Failed to export project profitability.");

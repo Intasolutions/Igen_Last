@@ -195,7 +195,18 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
 
         # 4b) direction fields: CR / DR / CREDIT / DEBIT etc.
         # Also treat longer labels that *contain* "credit" / "debit"
-        for k in ("cr_dr", "dr_cr", "type", "direction", "txn_dir", "transaction_type", "txn_type"):
+        for k in (
+            "cr_dr",
+            "dr_cr",
+            "type",
+            "direction",
+            "txn_dir",
+            "transaction_type",
+            "txn_type",
+            "entry_type",
+            "entry_side",
+            "dr_cr_flag",
+        ):
             if not hasattr(obj, k):
                 continue
             raw = getattr(obj, k)
@@ -235,6 +246,31 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
                 "refund paid",
                 "withdraw",
                 "withdrawal",
+                # generic expense words
+                "expense",
+                "expenses",
+                "maint",
+                "maintenance",
+                "interior",
+                "m & i",
+                "repair",
+                "repairs",
+                "service charge",
+                "bank charge",
+                "bank charges",
+                "charge",
+                "charges",
+                "fee",
+                "fees",
+                "commission",
+                "interest paid",
+                "penalty",
+                "fine",
+                "salary",
+                "wages",
+                "tds",
+                "tax",
+                "gst",
             )
             # Treat these as CREDITS (incoming to entity)
             CREDIT_KEYWORDS = (
@@ -247,6 +283,7 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
                 "inflow",
                 "deposit",
                 "advance received",
+                "refund received",
             )
 
             if any(k in ttype_name for k in DEBIT_KEYWORDS):
