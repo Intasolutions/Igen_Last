@@ -10,3 +10,4 @@ media/
 backups/
 venv/
 venv/
+requirements.broken.txt
