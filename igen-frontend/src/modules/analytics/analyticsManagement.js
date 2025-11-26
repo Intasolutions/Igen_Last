@@ -91,6 +91,50 @@ const Button = ({ variant = "solid", children, className = "", disabled, ...rest
   );
 };
 
+// Simple pagination component used across tables
+const Pagination = ({ page, pageSize, total, onPageChange }) => {
+  if (!total || total <= pageSize) return null;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  const start = (safePage - 1) * pageSize + 1;
+  const end = Math.min(safePage * pageSize, total);
+
+  const go = (p) => {
+    const np = Math.min(Math.max(p, 1), totalPages);
+    if (np !== page) onPageChange(np);
+  };
+
+  return (
+    <div className="flex items-center justify-between text-xs text-gray-600">
+      <div>
+        Showing <span className="font-medium">{start}</span>–<span className="font-medium">{end}</span>{" "}
+        of <span className="font-medium">{total}</span>
+      </div>
+      <div className="inline-flex items-center gap-1">
+        <Button
+          variant="outline"
+          disabled={safePage <= 1}
+          onClick={() => go(safePage - 1)}
+          className="h-7 px-2 text-xs"
+        >
+          Prev
+        </Button>
+        <span className="mx-1">
+          Page <span className="font-medium">{safePage}</span> / {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          disabled={safePage >= totalPages}
+          onClick={() => go(safePage + 1)}
+          className="h-7 px-2 text-xs"
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+};
+
 // Reusable dropdown export menu: label button + list of options
 const ExportMenu = ({
   label = "Generate",
@@ -634,6 +678,19 @@ function EntityStatement() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  // pagination
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+
+  useEffect(() => {
+    setPage(1);
+  }, [rows]);
+
+  const paginatedRows = useMemo(
+    () => rows.slice((page - 1) * pageSize, page * pageSize),
+    [rows, page]
+  );
+
   const load = async () => {
     if (!entity || !month) return;
     setLoading(true);
@@ -718,7 +775,23 @@ function EntityStatement() {
       </Card>
 
       <Card title="Transactions" subtitle="With running balance">
-        <Table headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}>
+        <Table
+          headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}
+          foot={
+            <tfoot>
+              <tr>
+                <td colSpan={6} className="px-3 py-2">
+                  <Pagination
+                    page={page}
+                    pageSize={pageSize}
+                    total={rows.length}
+                    onPageChange={setPage}
+                  />
+                </td>
+              </tr>
+            </tfoot>
+          }
+        >
           {loading && (
             <tr>
               <td className="px-3 py-8 text-gray-500" colSpan={6}>
@@ -734,7 +807,7 @@ function EntityStatement() {
             </tr>
           )}
           {!loading &&
-            rows.map((r, i) => (
+            paginatedRows.map((r, i) => (
               <tr key={i} className="hover:bg-gray-50">
                 <td className="px-3 py-2">{r.date || r.value_date}</td>
                 <td className="px-3 py-2">{r.transaction_type || r.txn_type || "—"}</td>
@@ -759,6 +832,30 @@ function MI() {
   const [active, setActive] = useState({ name: null, id: null });
   const [txns, setTxns] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  // pagination for entities & transactions
+  const [entityPage, setEntityPage] = useState(1);
+  const entityPageSize = 20;
+  const [txnPage, setTxnPage] = useState(1);
+  const txnPageSize = 25;
+
+  useEffect(() => {
+    setEntityPage(1);
+  }, [entities]);
+
+  useEffect(() => {
+    setTxnPage(1);
+  }, [txns, active]);
+
+  const paginatedEntities = useMemo(
+    () => entities.slice((entityPage - 1) * entityPageSize, entityPage * entityPageSize),
+    [entities, entityPage]
+  );
+
+  const paginatedTxns = useMemo(
+    () => txns.slice((txnPage - 1) * txnPageSize, txnPage * txnPageSize),
+    [txns, txnPage]
+  );
 
   const load = async () => {
     setLoading(true);
@@ -875,7 +972,23 @@ function MI() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="Entity Spend" subtitle="Click an entity to view transactions">
-          <Table headers={["Entity", "Spend (₹)"]}>
+          <Table
+            headers={["Entity", "Spend (₹)"]}
+            foot={
+              <tfoot>
+                <tr>
+                  <td colSpan={2} className="px-3 py-2">
+                    <Pagination
+                      page={entityPage}
+                      pageSize={entityPageSize}
+                      total={entities.length}
+                      onPageChange={setEntityPage}
+                    />
+                  </td>
+                </tr>
+              </tfoot>
+            }
+          >
             {loading && (
               <tr>
                 <td className="px-3 py-8 text-gray-500" colSpan={2}>
@@ -891,21 +1004,22 @@ function MI() {
               </tr>
             )}
             {!loading &&
-              entities.map((e, i) => (
-                <tr
-                  key={i}
-                  className="hover:bg-gray-50 cursor-pointer"
-                  onClick={() => drill(e.entity, e.id)}
-                >
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{e.entity}</span>
-                      <span className="text-xs text-gray-500">#{e.id ?? "—"}</span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 text-right">₹ {inr(e.balance)}</td>
-                </tr>
-              ))}
+  paginatedEntities.map((e, i) => (
+    <tr
+      key={i}
+      className="hover:bg-gray-50 cursor-pointer"
+      onClick={() => drill(e.entity, e.id)}
+    >
+      <td className="px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{e.entity}</span>
+          <span className="text-xs text-gray-500">#{e.id ?? "—"}</span>
+        </div>
+      </td> {/* ← this line was missing */}
+      <td className="px-3 py-2 text-right">₹ {inr(e.balance)}</td>
+    </tr>
+  ))}
+
           </Table>
         </Card>
 
@@ -913,7 +1027,23 @@ function MI() {
           title={active.name ? `Transactions — ${active.name}` : "Transactions"}
           subtitle={active.name ? "Filtered by entity" : "Select an entity to drill"}
         >
-          <Table headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}>
+          <Table
+            headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}
+            foot={
+              <tfoot>
+                <tr>
+                  <td colSpan={6} className="px-3 py-2">
+                    <Pagination
+                      page={txnPage}
+                      pageSize={txnPageSize}
+                      total={txns.length}
+                      onPageChange={setTxnPage}
+                    />
+                  </td>
+                </tr>
+              </tfoot>
+            }
+          >
             {active.name === null && (
               <tr>
                 <td className="px-3 py-8 text-gray-500" colSpan={6}>
@@ -928,7 +1058,7 @@ function MI() {
                 </td>
               </tr>
             )}
-            {txns.map((r, i) => (
+            {paginatedTxns.map((r, i) => (
               <tr key={i} className="hover:bg-gray-50">
                 <td className="px-3 py-2">{r.value_date}</td>
                 <td className="px-3 py-2">{r.txn_type || "—"}</td>
@@ -952,6 +1082,30 @@ function ProjectProfitability() {
   const [rows, setRows] = useState([]);
   const [txns, setTxns] = useState([]);
   const [active, setActive] = useState(null);
+
+  // pagination
+  const [summaryPage, setSummaryPage] = useState(1);
+  const summaryPageSize = 20;
+  const [txnPage, setTxnPage] = useState(1);
+  const txnPageSize = 25;
+
+  useEffect(() => {
+    setSummaryPage(1);
+  }, [rows]);
+
+  useEffect(() => {
+    setTxnPage(1);
+  }, [txns, active]);
+
+  const paginatedSummary = useMemo(
+    () => rows.slice((summaryPage - 1) * summaryPageSize, summaryPage * summaryPageSize),
+    [rows, summaryPage]
+  );
+
+  const paginatedTxns = useMemo(
+    () => txns.slice((txnPage - 1) * txnPageSize, txnPage * txnPageSize),
+    [txns, txnPage]
+  );
 
   const load = async () => {
     try {
@@ -989,7 +1143,7 @@ function ProjectProfitability() {
       const m = cd.match(/filename="?([^"]+)"?/i);
       const filename = m?.[1] || `project_profitability_${from}_${to}.xlsx`;
 
-       const a = document.createElement("a");
+      const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       document.body.appendChild(a);
@@ -999,7 +1153,6 @@ function ProjectProfitability() {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
       }, 150);
-
     } catch (e) {
       console.error(e);
       alert("Failed to export project profitability.");
@@ -1057,7 +1210,23 @@ function ProjectProfitability() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="Summary" subtitle="Click a row to drill transactions">
-          <Table headers={["Project", "Inflows (₹)", "Outflows (₹)", "Net (₹)"]}>
+          <Table
+            headers={["Project", "Inflows (₹)", "Outflows (₹)", "Net (₹)"]}
+            foot={
+              <tfoot>
+                <tr>
+                  <td colSpan={4} className="px-3 py-2">
+                    <Pagination
+                      page={summaryPage}
+                      pageSize={summaryPageSize}
+                      total={rows.length}
+                      onPageChange={setSummaryPage}
+                    />
+                  </td>
+                </tr>
+              </tfoot>
+            }
+          >
             {rows.length === 0 && (
               <tr>
                 <td className="px-3 py-8 text-gray-500" colSpan={4}>
@@ -1065,7 +1234,7 @@ function ProjectProfitability() {
                 </td>
               </tr>
             )}
-            {rows.map((r, i) => (
+            {paginatedSummary.map((r, i) => (
               <tr
                 key={i}
                 className="hover:bg-gray-50 cursor-pointer"
@@ -1094,7 +1263,23 @@ function ProjectProfitability() {
           title={active ? `Transactions — ${active}` : "Transactions"}
           subtitle={active ? "Filtered by project" : "Select a project to drill"}
         >
-          <Table headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}>
+          <Table
+            headers={["Date", "Type", "Credit (₹)", "Debit (₹)", "Balance (₹)", "Remarks"]}
+            foot={
+              <tfoot>
+                <tr>
+                  <td colSpan={6} className="px-3 py-2">
+                    <Pagination
+                      page={txnPage}
+                      pageSize={txnPageSize}
+                      total={txns.length}
+                      onPageChange={setTxnPage}
+                    />
+                  </td>
+                </tr>
+              </tfoot>
+            }
+          >
             {!active && (
               <tr>
                 <td className="px-3 py-8 text-gray-500" colSpan={6}>
@@ -1109,7 +1294,7 @@ function ProjectProfitability() {
                 </td>
               </tr>
             )}
-            {txns.map((r, i) => (
+            {paginatedTxns.map((r, i) => (
               <tr key={i} className="hover:bg-gray-50">
                 <td className="px-3 py-2">{r.value_date}</td>
                 <td className="px-3 py-2">{r.txn_type || "—"}</td>
@@ -1144,12 +1329,25 @@ function FinancialDashboard() {
   const [totals, setTotals] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // pagination
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+
+  useEffect(() => {
+    setPage(1);
+  }, [rows]);
+
   const defaultHeaders = useMemo(() => {
     const base = [...(dateOn ? ["date"] : []), ...dims, "credit", "debit", "margin"];
     return base;
   }, [dateOn, dims]);
 
   const headers = rows.length ? Object.keys(rows[0]) : defaultHeaders;
+
+  const paginatedRows = useMemo(
+    () => rows.slice((page - 1) * pageSize, page * pageSize),
+    [rows, page]
+  );
 
   const toggleDim = (d) =>
     setDims((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
@@ -1399,7 +1597,23 @@ function FinancialDashboard() {
           ) : null
         }
       >
-        <Table headers={headers}>
+        <Table
+          headers={headers}
+          foot={
+            <tfoot>
+              <tr>
+                <td colSpan={headers.length} className="px-3 py-2">
+                  <Pagination
+                    page={page}
+                    pageSize={pageSize}
+                    total={rows.length}
+                    onPageChange={setPage}
+                  />
+                </td>
+              </tr>
+            </tfoot>
+          }
+        >
           {rows.length === 0 && (
             <tr>
               <td className="px-3 py-8 text-gray-500" colSpan={headers.length}>
@@ -1407,7 +1621,7 @@ function FinancialDashboard() {
               </td>
             </tr>
           )}
-          {rows.map((r, i) => (
+          {paginatedRows.map((r, i) => (
             <tr key={i} className="hover:bg-gray-50">
               {headers.map((h) => (
                 <td key={h} className="px-3 py-2">
@@ -1430,6 +1644,19 @@ function OwnerRentalTab() {
 
   const [editing, setEditing] = useState({});
   const [drafts, setDrafts] = useState({});
+
+  // pagination
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
+
+  useEffect(() => {
+    setPage(1);
+  }, [rows]);
+
+  const paginatedRows = useMemo(
+    () => rows.slice((page - 1) * pageSize, page * pageSize),
+    [rows, page]
+  );
 
   const load = async () => {
     setLoading(true);
@@ -1612,6 +1839,20 @@ function OwnerRentalTab() {
             "Email Sent",
             "Actions",
           ]}
+          foot={
+            <tfoot>
+              <tr>
+                <td colSpan={12} className="px-3 py-2">
+                  <Pagination
+                    page={page}
+                    pageSize={pageSize}
+                    total={rows.length}
+                    onPageChange={setPage}
+                  />
+                </td>
+              </tr>
+            </tfoot>
+          }
         >
           {loading && (
             <tr>
@@ -1628,7 +1869,7 @@ function OwnerRentalTab() {
             </tr>
           )}
           {!loading &&
-            rows.map((r) => {
+            paginatedRows.map((r) => {
               const isEditing = !!editing[r.id];
               const draft = drafts[r.id] || {};
               return (
@@ -1779,7 +2020,8 @@ function OwnerRentalTab() {
                     )}
                   </td>
                 </tr>
-              );
+
+        );
             })}
         </Table>
       </Card>
@@ -1829,3 +2071,4 @@ export default function AnalyticsManagement() {
     </div>
   );
 }
+

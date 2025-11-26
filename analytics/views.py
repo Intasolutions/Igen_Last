@@ -80,6 +80,41 @@ def _format_period(d: date, granularity: str) -> str:
     return d.isoformat()
 
 
+def _safe_filename_part(s) -> str:
+    """
+    Make a string safe to use in filenames (no spaces/special chars).
+    """
+    txt = str(s or "").strip()
+    if not txt:
+        return "NA"
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in txt)
+
+
+def _get_entity_display(entity_id: int):
+    """
+    Helper to get a nice label for an Entity:
+      - name
+      - optional code/property_code
+    """
+    try:
+        Entity = apps.get_model("entities", "Entity")
+    except Exception:
+        return {"name": f"Entity {entity_id}", "code": None}
+
+    try:
+        ent = Entity.objects.get(pk=entity_id)
+    except Exception:
+        return {"name": f"Entity {entity_id}", "code": None}
+
+    name = getattr(ent, "name", None) or f"Entity {entity_id}"
+    code = (
+        getattr(ent, "code", None)
+        or getattr(ent, "property_code", None)
+        or getattr(ent, "short_code", None)
+    )
+    return {"name": name, "code": code}
+
+
 # --------------------------- Quick health/debug ---------------------------
 
 
@@ -248,6 +283,20 @@ class EntityStatementPDFView(APIView):
                 status=400,
             )
 
+        # Nicely formatted heading: Owner/Entity Name + Property Code (if any) + Year-Month
+        try:
+            eid_int = int(entity_id)
+        except Exception:
+            eid_int = None
+
+        if eid_int is not None:
+            ent_label = _get_entity_display(eid_int)
+            ent_name = ent_label["name"]
+            ent_code = ent_label["code"]
+        else:
+            ent_name = f"Entity {entity_id}"
+            ent_code = None
+
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
@@ -271,11 +320,17 @@ class EntityStatementPDFView(APIView):
             for r in rows
         ]
 
-        pdf = export_simple_pdf(f"Entity {entity_id} - Statement {month}", headers, table)
+        # Heading: "OwnerName / EntityName - PropertyCode - YYYY-MM Statement"
+        if ent_code:
+            title = f"{ent_name} - {ent_code} - {month} Statement"
+        else:
+            title = f"{ent_name} - {month} Statement"
+
+        pdf = export_simple_pdf(title, headers, table)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
         resp[
             "Content-Disposition"
-        ] = f'attachment; filename="entity_{entity_id}_{month}_statement.pdf"'
+        ] = f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{month}.pdf"'
         return resp
 
 
@@ -302,6 +357,17 @@ class EntityStatementDOCXView(APIView):
                 status=400,
             )
 
+        try:
+            eid_int = int(entity_id)
+        except Exception:
+            eid_int = None
+
+        if eid_int is not None:
+            ent_label = _get_entity_display(eid_int)
+            ent_name = ent_label["name"]
+        else:
+            ent_name = f"Entity {entity_id}"
+
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
@@ -313,7 +379,7 @@ class EntityStatementDOCXView(APIView):
         rows = running_balance(base_rows, opening_balance=obal)
 
         doc = Document()
-        doc.add_heading(f"Entity {entity_id} - Monthly Statement", level=1)
+        doc.add_heading(f"{ent_name} - Monthly Statement", level=1)
         p = doc.add_paragraph()
         p.add_run(f"Period: {month}").italic = True
 
@@ -348,7 +414,7 @@ class EntityStatementDOCXView(APIView):
         )
         resp[
             "Content-Disposition"
-        ] = f'attachment; filename="entity_{entity_id}_{month}_statement.docx"'
+        ] = f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{month}.docx"'
         return resp
 
 
@@ -367,6 +433,17 @@ class EntityStatementExcelView(APIView):
                 {"detail": "entity_id & month (YYYY-MM) required"},
                 status=400,
             )
+
+        try:
+            eid_int = int(entity_id)
+        except Exception:
+            eid_int = None
+
+        if eid_int is not None:
+            ent_label = _get_entity_display(eid_int)
+            ent_name = ent_label["name"]
+        else:
+            ent_name = f"Entity {entity_id}"
 
         start, end = _month_range(month)
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
@@ -401,7 +478,7 @@ class EntityStatementExcelView(APIView):
         )
         resp[
             "Content-Disposition"
-        ] = f'attachment; filename="entity_{entity_id}_{month}_statement.xlsx"'
+        ] = f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{month}.xlsx"'
         return resp
 
 
@@ -474,6 +551,11 @@ class MIExpensesTransactionsView(APIView):
 
 
 class MIExpensesExportView(APIView):
+    """
+    Excel export that matches the entity-wise M&I YTD view:
+      - one row per (entity_id, entity_name)
+      - balance = debit - credit
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -488,12 +570,15 @@ class MIExpensesExportView(APIView):
 
         agg = {}
         for r in rows:
-            key = r.get("entity") or "—"
+            key = (r.get("entity_id"), r.get("entity") or "—")
             agg[key] = agg.get(key, Decimal("0")) + (r.get("debit") or 0) - (
                 r.get("credit") or 0
             )
 
-        xlsx = export_excel(["Entity", "Balance"], [[k, v] for k, v in agg.items()])
+        headers = ["Entity ID", "Entity", "Balance"]
+        data = [[k[0], k[1], v] for k, v in agg.items()]
+
+        xlsx = export_excel(headers, data)
         resp = HttpResponse(
             xlsx.read(),
             content_type=(
@@ -503,7 +588,7 @@ class MIExpensesExportView(APIView):
         )
         resp[
             "Content-Disposition"
-        ] = f'attachment; filename="mi_entity_balance_{f}_{t}.xlsx"'
+        ] = f'attachment; filename="mi_ytd_entity_balance_{f}_{t}.xlsx"'
         return resp
 
 
@@ -903,7 +988,6 @@ class OwnerRentalPropertyPatchView(APIView):
             val = clean_number(data.get("rent"))
             # Prefer monthly_rent, then expected_rent, finally rent
             for field in ("monthly_rent", "expected_rent", "rent"):
-                if hasattr(prop, field):
                     if getattr(prop, field) != val:
                         setattr(prop, field, val)
                         prop_fields_changed.append(field)
@@ -965,7 +1049,8 @@ class OwnerRentalPropertyPatchView(APIView):
                 "status": "ok",
                 "property_fields": list(set(prop_fields_changed)),
                 "flags": flag_fields_changed,
-            },status.HTTP_200_OK,
+            },
+            status.HTTP_200_OK,
         )
 
 
@@ -1014,12 +1099,26 @@ class OwnerRentalPropertyStatementPDFView(APIView):
             for r in rows
         ]
 
-        title = f"Property {prop.name} - Statement {month}"
+        # Owner + property code for heading and filename
+        owner_name = (
+            getattr(getattr(prop, "landlord", None), "full_name", None)
+            or getattr(getattr(prop, "landlord", None), "name", None)
+        )
+        prop_code = (
+            getattr(prop, "code", None)
+            or getattr(prop, "property_code", None)
+            or getattr(prop, "name", None)
+            or f"Property {prop.id}"
+        )
+        owner_or_entity = owner_name or "Owner"
+
+        # Heading: "OwnerName - PropertyCode - YYYY-MM Owner Statement"
+        title = f"{owner_or_entity} - {prop_code} - {month} Owner Statement"
+
         pdf = export_simple_pdf(title, headers, table)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
-        resp[
-            "Content-Disposition"
-        ] = f'attachment; filename="property_{prop.id}_{month}_statement.pdf"'
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.pdf"
+        resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
 
@@ -1057,8 +1156,22 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
         if not rows:
             rows = _synthetic_property_statement_rows(prop, month)
 
+        owner_name = (
+            getattr(getattr(prop, "landlord", None), "full_name", None)
+            or getattr(getattr(prop, "landlord", None), "name", None)
+        )
+        prop_code = (
+            getattr(prop, "code", None)
+            or getattr(prop, "property_code", None)
+            or getattr(prop, "name", None)
+            or f"Property {prop.id}"
+        )
+        owner_or_entity = owner_name or "Owner"
+
         doc = Document()
-        doc.add_heading(f"Property {prop.name} - Monthly Statement", level=1)
+        doc.add_heading(
+            f"{owner_or_entity} - {prop_code} - {month} Owner Statement", level=1
+        )
         p = doc.add_paragraph()
         p.add_run(f"Period: {month}").italic = True
 
@@ -1092,9 +1205,8 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
                 "wordprocessingml.document"
             ),
         )
-        resp[
-            "Content-Disposition"
-        ] = f'attachment; filename="property_{prop.id}_{month}_statement.docx"'
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.docx"
+        resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
 
@@ -1147,9 +1259,14 @@ class OwnerRentalPropertyStatementExcelView(APIView):
                 "spreadsheetml.sheet"
             ),
         )
-        resp[
-            "Content-Disposition"
-        ] = f'attachment; filename="property_{prop.id}_{month}_statement.xlsx"'
+        prop_code = (
+            getattr(prop, "code", None)
+            or getattr(prop, "property_code", None)
+            or getattr(prop, "name", None)
+            or f"Property {prop.id}"
+        )
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.xlsx"
+        resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
 
@@ -1171,23 +1288,25 @@ class ProjectProfitabilitySummaryView(APIView):
             project_id=int(project_id) if project_id else None,
         )
 
+        # group by actual project_id + project name
         agg = {}
         for r in rows:
-            proj = r.get("entity") or r.get("contract") or "—"  # adapt as needed
-            a = agg.setdefault(proj, {"in": Decimal("0"), "out": Decimal("0")})
+            key = (r.get("project_id"), r.get("project") or "—")
+            a = agg.setdefault(key, {"in": Decimal("0"), "out": Decimal("0")})
             a["in"] += r.get("credit") or 0
             a["out"] += r.get("debit") or 0
 
         out = [
             {
-                "project": k,
+                "project_id": k[0],
+                "project": k[1],
                 "inflows": v["in"],
                 "outflows": v["out"],
                 "net": v["in"] - v["out"],
             }
             for k, v in agg.items()
         ]
-        out.sort(key=lambda x: x["project"])
+        out.sort(key=lambda x: x["project"] or "")
         return Response(ProjectProfitRowSerializer(out, many=True).data)
 
 
@@ -1210,6 +1329,9 @@ class ProjectProfitabilityTransactionsView(APIView):
 
 
 class ProjectProfitabilityExportView(APIView):
+    """
+    Excel export for the summary (first) table.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -1218,8 +1340,17 @@ class ProjectProfitabilityExportView(APIView):
         rows = ProjectProfitabilitySummaryView().get(request).data  # reuse payload
 
         xlsx = export_excel(
-            ["Project", "Inflows", "Outflows", "Net"],
-            [[r["project"], r["inflows"], r["outflows"], r["net"]] for r in rows],
+            ["Project ID", "Project", "Inflows", "Outflows", "Net"],
+            [
+                [
+                    r.get("project_id"),
+                    r.get("project"),
+                    r.get("inflows"),
+                    r.get("outflows"),
+                    r.get("net"),
+                ]
+                for r in rows
+            ],
         )
         resp = HttpResponse(
             xlsx.read(),
@@ -1231,6 +1362,77 @@ class ProjectProfitabilityExportView(APIView):
         resp[
             "Content-Disposition"
         ] = f'attachment; filename="project_profitability_{f}_{t}.xlsx"'
+        return resp
+
+
+class ProjectProfitabilityTransactionsExportView(APIView):
+    """
+    Excel export for the transactions (third) table.
+    Params:
+      - from
+      - to
+      - project_id (optional, filters when provided)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        f = parse_date(request.GET.get("from")) or date(date.today().year, 1, 1)
+        t = parse_date(request.GET.get("to")) or date.today()
+        project_id = request.GET.get("project_id")
+
+        rows = unified_ledger(
+            request.user,
+            from_date=f,
+            to_date=t,
+            project_id=int(project_id) if project_id else None,
+        )
+        rows = running_balance(rows, opening_balance=Decimal("0"))
+
+        headers = [
+            "Date",
+            "Project",
+            "Txn Type",
+            "Credit",
+            "Debit",
+            "Balance",
+            "Entity",
+            "Cost Centre",
+            "Contract",
+            "Asset",
+            "Remarks",
+        ]
+        data = []
+        for r in rows:
+            data.append(
+                [
+                    r.get("value_date").strftime("%Y-%m-%d") if r.get("value_date") else "",
+                    r.get("project") or "",
+                    r.get("txn_type") or "",
+                    r.get("credit") or 0,
+                    r.get("debit") or 0,
+                    r.get("balance") or 0,
+                    r.get("entity") or "",
+                    r.get("cost_centre") or "",
+                    r.get("contract") or "",
+                    r.get("asset") or "",
+                    (r.get("remarks") or "")[:256],
+                ]
+            )
+
+        xlsx = export_excel(headers, data)
+        resp = HttpResponse(
+            xlsx.read(),
+            content_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+        )
+        suffix = f"_{f}_{t}"
+        if project_id:
+            suffix += f"_project{project_id}"
+        resp[
+            "Content-Disposition"
+        ] = f'attachment; filename="project_profitability_transactions{suffix}.xlsx"'
         return resp
 
 
