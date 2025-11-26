@@ -4,6 +4,8 @@ from typing import Iterable, List, Optional
 from datetime import datetime
 from decimal import Decimal
 
+from django.utils import timezone  # ✅ NEW: use Django timezone for correct local time
+
 # ---------- Excel ----------
 try:
     from openpyxl import Workbook
@@ -161,7 +163,10 @@ def export_simple_pdf(title: str, headers: List[str], rows: List[List[str]]):
 
     # Footer
     def draw_footer(page_num: int):
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # ✅ Use Django timezone-aware local time instead of naive datetime.now()
+        now = timezone.localtime() if hasattr(timezone, "localtime") else datetime.now()
+        ts = now.strftime("%Y-%m-%d %H:%M")
+
         c.setFont("Helvetica", 8)
         c.setFillColor(colors.grey)
         c.drawRightString(width - right, bottom - 0.3 * cm, f"Page {page_num}")
