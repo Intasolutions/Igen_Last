@@ -39,6 +39,7 @@
     "react-select": "^5.10.2",
     "react-tooltip": "^4.5.1",
     "web-vitals": "^2.1.4",
+    "xlsx": "^0.18.5",
     "yup": "^1.6.1"
   },
   "scripts": {

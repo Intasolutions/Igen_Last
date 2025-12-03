@@ -556,6 +556,7 @@ class MIExpensesExportView(APIView):
       - one row per (entity_id, entity_name)
       - balance = debit - credit
     """
+
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -602,14 +603,57 @@ def _get_property_model():
         return None
 
 
+def _entity_for_property(prop: Property):
+    """
+    Resolve the Entity row linked to a Property via entities.Entity.linked_property.
+
+    We keep this SAFE for production:
+      - Always filter by linked_property.
+      - If fields like entity_type/status exist, apply nice filters.
+      - Otherwise just pick the latest row.
+    """
+    try:
+        Entity = apps.get_model("entities", "Entity")
+    except Exception:
+        return None
+
+    qs = Entity.objects.filter(linked_property=prop)
+
+    # Optional filters – only if those fields actually exist on the model.
+    field_names = {f.name for f in Entity._meta.get_fields()}
+
+    if "entity_type" in field_names:
+        qs = qs.filter(Q(entity_type="Property") | Q(entity_type__iexact="property"))
+
+    if "status" in field_names:
+        qs = qs.filter(Q(status="Active") | Q(status__iexact="active"))
+
+    # Prefer created_at if present, else id
+    if "created_at" in field_names:
+        qs = qs.order_by("-created_at")
+    else:
+        qs = qs.order_by("-id")
+
+    try:
+        return qs.first()
+    except Exception:
+        return None
+
+
 def _extract_entity_id_from_property(p):
     """
     Try to find an entity id for the statement:
+    - Entity linked via entities.Entity.linked_property (preferred)
     - p.entity_id or p.entity.id
     - contacts linked via tenant_contact / landlord / owner / tenant_entity / owner_entity
       (and their .entity/.entity_id)
     - p.unit / p.apartment (and their .entity/.id)
     """
+    # First, prefer the canonical Entity linkage
+    ent = _entity_for_property(p)
+    if ent:
+        return getattr(ent, "id", None) or getattr(ent, "entity_id", None)
+
     # direct FK if ever added
     eid = getattr(p, "entity_id", None)
     if eid:
@@ -648,30 +692,38 @@ def _extract_entity_id_from_property(p):
     return None
 
 
-def _statement_rows_for_property(user, prop: Property, month: str):
+def _statement_rows_for_property(user, prop: Property, from_date: date, to_date: date):
     """
-    Common helper for property-based statements.
+    Build a classified, ledger-backed statement for a single property
+    over an arbitrary date range [from_date, to_date].
 
-    1. Try using an entity_id derived from the property.
-    2. If that yields no rows, fall back to apartment_id=property.id.
+    Implementation:
+      - Resolve entities.Entity for this property via linked_property.
+      - Pull rows from unified_ledger() filtered by that entity_id and date range.
+      - Apply running_balance() with opening_balance_until() as of from_date.
     """
-    start, end = _month_range(month)
+    if not (from_date and to_date):
+        return []
 
-    candidate_filters = []
-    eid = _extract_entity_id_from_property(prop)
-    if eid:
-        candidate_filters.append({"entity_id": int(eid)})
-    # always try apartment_id fallback as well
-    candidate_filters.append({"apartment_id": prop.id})
+    ent = _entity_for_property(prop)
+    if not ent:
+        return []
 
-    for flt in candidate_filters:
-        obal = opening_balance_until(user, start, **flt)
-        base_rows = unified_ledger(user, from_date=start, to_date=end, **flt)
-        if base_rows:
-            return running_balance(base_rows, opening_balance=obal)
+    entity_id = getattr(ent, "id", None) or getattr(ent, "entity_id", None)
+    if not entity_id:
+        return []
 
-    # nothing matched → empty statement
-    return []
+    # Opening balance is strictly before from_date
+    obal = opening_balance_until(user, from_date, entity_id=entity_id)
+
+    base_rows = unified_ledger(
+        user,
+        from_date=from_date,
+        to_date=to_date,
+        entity_id=entity_id,
+    )
+    rows = running_balance(base_rows, opening_balance=obal)
+    return rows
 
 
 def _synthetic_property_statement_rows(prop: Property, month: str):
@@ -942,8 +994,7 @@ class OwnerRentalPropertyPatchView(APIView):
       - Rent
       - iGen Service Charge
       - Lease Start / Lease Expiry
-      - Agreement Renewal Date
-      - Flags: transaction_scheduled, email_sent
+      - Agreem   - Flags: transaction_scheduled, email_sent
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -988,6 +1039,7 @@ class OwnerRentalPropertyPatchView(APIView):
             val = clean_number(data.get("rent"))
             # Prefer monthly_rent, then expected_rent, finally rent
             for field in ("monthly_rent", "expected_rent", "rent"):
+                if hasattr(prop, field):
                     if getattr(prop, field) != val:
                         setattr(prop, field, val)
                         prop_fields_changed.append(field)
@@ -1039,7 +1091,6 @@ class OwnerRentalPropertyPatchView(APIView):
 
         # ---------- save ----------
         if prop_fields_changed:
-            # remove duplicates if any
             prop.save(update_fields=list(set(prop_fields_changed)))
         if flag_fields_changed:
             flags.save(update_fields=list(flag_fields_changed.keys()))
@@ -1059,10 +1110,11 @@ class OwnerRentalPropertyPatchView(APIView):
 
 class OwnerRentalPropertyStatementPDFView(APIView):
     """
-    Generate monthly statement for a single property as PDF.
-    Params:
-      - property_id
-      - month (YYYY-MM)
+    Generate statement for a single property as PDF.
+    Params (any one period selector):
+      - property_id (required)
+      - month (YYYY-MM)  OR
+      - from (YYYY-MM-DD) & to (YYYY-MM-DD)
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -1070,9 +1122,12 @@ class OwnerRentalPropertyStatementPDFView(APIView):
     def get(self, request):
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
-        if not (property_id and month):
+        from_str = request.GET.get("from")
+        to_str = request.GET.get("to")
+
+        if not property_id:
             return Response(
-                {"detail": "property_id & month (YYYY-MM) required"},
+                {"detail": "property_id is required"},
                 status=400,
             )
 
@@ -1081,10 +1136,36 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         except (Property.DoesNotExist, ValueError):
             return Response({"detail": "Property not found"}, status=404)
 
-        rows = _statement_rows_for_property(request.user, prop, month)
+        # Determine period: explicit from/to win over month
+        from_date = to_date = None
+        period_label = None
 
-        if not rows:
-            rows = _synthetic_property_statement_rows(prop, month)
+        if from_str or to_str:
+            from_date = parse_date(from_str) if from_str else None
+            to_date = parse_date(to_str) if to_str else None
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "Both 'from' and 'to' must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+            period_label = f"{from_date} to {to_date}"
+            fallback_month = month or from_date.strftime("%Y-%m")
+        else:
+            if not month:
+                return Response(
+                    {"detail": "Either month (YYYY-MM) or from/to is required."},
+                    status=400,
+                )
+            from_date, to_date = _month_range(month)
+            period_label = month
+            fallback_month = month
+
+        rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
+
+        if not rows and fallback_month:
+            rows = _synthetic_property_statement_rows(prop, fallback_month)
+	
+
 
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = [
@@ -1112,22 +1193,29 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         )
         owner_or_entity = owner_name or "Owner"
 
-        # Heading: "OwnerName - PropertyCode - YYYY-MM Owner Statement"
-        title = f"{owner_or_entity} - {prop_code} - {month} Owner Statement"
+        # Heading: "OwnerName - PropertyCode - Period Owner Statement"
+        title = f"{owner_or_entity} - {prop_code} - {period_label} Owner Statement"
 
         pdf = export_simple_pdf(title, headers, table)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
-        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.pdf"
+
+        if month:
+            suffix = month
+        else:
+            suffix = f"{from_date}_to_{to_date}"
+
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{suffix}.pdf"
         resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
 
 class OwnerRentalPropertyStatementDOCXView(APIView):
     """
-    Generate monthly statement for a single property as Word.
-    Params:
-      - property_id
-      - month (YYYY-MM)
+    Generate statement for a single property as Word.
+    Params (any one period selector):
+      - property_id (required)
+      - month (YYYY-MM)  OR
+      - from (YYYY-MM-DD) & to (YYYY-MM-DD)
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -1141,9 +1229,12 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
 
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
-        if not (property_id and month):
+        from_str = request.GET.get("from")
+        to_str = request.GET.get("to")
+
+        if not property_id:
             return Response(
-                {"detail": "property_id & month (YYYY-MM) required"},
+                {"detail": "property_id is required"},
                 status=400,
             )
 
@@ -1152,9 +1243,33 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
         except (Property.DoesNotExist, ValueError):
             return Response({"detail": "Property not found"}, status=404)
 
-        rows = _statement_rows_for_property(request.user, prop, month)
-        if not rows:
-            rows = _synthetic_property_statement_rows(prop, month)
+        # Determine period
+        from_date = to_date = None
+        period_label = None
+
+        if from_str or to_str:
+            from_date = parse_date(from_str) if from_str else None
+            to_date = parse_date(to_str) if to_str else None
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "Both 'from' and 'to' must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+            period_label = f"{from_date} to {to_date}"
+            fallback_month = month or from_date.strftime("%Y-%m")
+        else:
+            if not month:
+                return Response(
+                    {"detail": "Either month (YYYY-MM) or from/to is required."},
+                    status=400,
+                )
+            from_date, to_date = _month_range(month)
+            period_label = month
+            fallback_month = month
+
+        rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
+        if not rows and fallback_month:
+            rows = _synthetic_property_statement_rows(prop, fallback_month)
 
         owner_name = (
             getattr(getattr(prop, "landlord", None), "full_name", None)
@@ -1170,10 +1285,10 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
 
         doc = Document()
         doc.add_heading(
-            f"{owner_or_entity} - {prop_code} - {month} Owner Statement", level=1
+            f"{owner_or_entity} - {prop_code} - {period_label} Owner Statement", level=1
         )
         p = doc.add_paragraph()
-        p.add_run(f"Period: {month}").italic = True
+        p.add_run(f"Period: {period_label}").italic = True
 
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = doc.add_table(rows=1, cols=len(headers))
@@ -1205,17 +1320,24 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
                 "wordprocessingml.document"
             ),
         )
-        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.docx"
+
+        if month:
+            suffix = month
+        else:
+            suffix = f"{from_date}_to_{to_date}"
+
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{suffix}.docx"
         resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
 
 class OwnerRentalPropertyStatementExcelView(APIView):
     """
-    Generate monthly statement for a single property as Excel.
-    Params:
-      - property_id
-      - month (YYYY-MM)
+    Generate statement for a single property as Excel.
+    Params (any one period selector):
+      - property_id (required)
+      - month (YYYY-MM)  OR
+      - from (YYYY-MM-DD) & to (YYYY-MM-DD)
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -1223,9 +1345,12 @@ class OwnerRentalPropertyStatementExcelView(APIView):
     def get(self, request):
         property_id = request.GET.get("property_id")
         month = request.GET.get("month")
-        if not (property_id and month):
+        from_str = request.GET.get("from")
+        to_str = request.GET.get("to")
+
+        if not property_id:
             return Response(
-                {"detail": "property_id & month (YYYY-MM) required"},
+                {"detail": "property_id is required"},
                 status=400,
             )
 
@@ -1234,9 +1359,33 @@ class OwnerRentalPropertyStatementExcelView(APIView):
         except (Property.DoesNotExist, ValueError):
             return Response({"detail": "Property not found"}, status=404)
 
-        rows = _statement_rows_for_property(request.user, prop, month)
-        if not rows:
-            rows = _synthetic_property_statement_rows(prop, month)
+        # Determine period
+        from_date = to_date = None
+        period_label = None
+
+        if from_str or to_str:
+            from_date = parse_date(from_str) if from_str else None
+            to_date = parse_date(to_str) if to_str else None
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "Both 'from' and 'to' must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+            period_label = f"{from_date} to {to_date}"
+            fallback_month = month or from_date.strftime("%Y-%m")
+        else:
+            if not month:
+                return Response(
+                    {"detail": "Either month (YYYY-MM) or from/to is required."},
+                    status=400,
+                )
+            from_date, to_date = _month_range(month)
+            period_label = month
+            fallback_month = month
+
+        rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
+        if not rows and fallback_month:
+            rows = _synthetic_property_statement_rows(prop, fallback_month)
 
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         data = [
@@ -1265,7 +1414,13 @@ class OwnerRentalPropertyStatementExcelView(APIView):
             or getattr(prop, "name", None)
             or f"Property {prop.id}"
         )
-        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{month}.xlsx"
+
+        if month:
+            suffix = month
+        else:
+            suffix = f"{from_date}_to_{to_date}"
+
+        fname = f"OwnerStatement_{_safe_filename_part(prop_code)}_{suffix}.xlsx"
         resp["Content-Disposition"] = f'attachment; filename="{fname}"'
         return resp
 
@@ -1288,13 +1443,22 @@ class ProjectProfitabilitySummaryView(APIView):
             project_id=int(project_id) if project_id else None,
         )
 
+        # Normalise project name so we always have r["project"]
+        for r in rows:
+            r["project"] = (
+                r.get("project")
+                or r.get("project_name")
+                or r.get("project__name")
+                or "—"
+            )
+
         # group by actual project_id + project name
         agg = {}
         for r in rows:
             key = (r.get("project_id"), r.get("project") or "—")
             a = agg.setdefault(key, {"in": Decimal("0"), "out": Decimal("0")})
-            a["in"] += r.get("credit") or 0
-            a["out"] += r.get("debit") or 0
+            a["in"] += r.get("credit") or Decimal("0")
+            a["out"] += r.get("debit") or Decimal("0")
 
         out = [
             {
@@ -1324,6 +1488,16 @@ class ProjectProfitabilityTransactionsView(APIView):
             to_date=t,
             project_id=int(project_id) if project_id else None,
         )
+
+        # Normalise project name here too so exports & API rows see it
+        for r in rows:
+            r["project"] = (
+                r.get("project")
+                or r.get("project_name")
+                or r.get("project__name")
+                or ""
+            )
+
         rows = running_balance(rows, opening_balance=Decimal("0"))
         return Response(rows)
 
@@ -1332,6 +1506,7 @@ class ProjectProfitabilityExportView(APIView):
     """
     Excel export for the summary (first) table.
     """
+
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -1373,6 +1548,7 @@ class ProjectProfitabilityTransactionsExportView(APIView):
       - to
       - project_id (optional, filters when provided)
     """
+
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -1386,6 +1562,16 @@ class ProjectProfitabilityTransactionsExportView(APIView):
             to_date=t,
             project_id=int(project_id) if project_id else None,
         )
+
+        # Normalise project name for export
+        for r in rows:
+            r["project"] = (
+                r.get("project")
+                or r.get("project_name")
+                or r.get("project__name")
+                or ""
+            )
+
         rows = running_balance(rows, opening_balance=Decimal("0"))
 
         headers = [
@@ -1443,7 +1629,7 @@ class FinancialDashboardPivotView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        body = request.data or {}
+        body = request.data or []
         # e.g. ["cost_centre","txn_type","entity","asset","contract","date"]
         dims = body.get("dims") or []
         values = body.get("values") or {}  # {"entity":[...], ...}

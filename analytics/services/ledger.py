@@ -87,7 +87,9 @@ def _get_field(Model, name: str):
 
 def _is_rel(Model, field_name: str) -> bool:
     f = _get_field(Model, field_name)
-    return bool(f and getattr(f, "is_relation", False) and getattr(f, "related_model", None))
+    return bool(
+        f and getattr(f, "is_relation", False) and getattr(f, "related_model", None)
+    )
 
 
 def _related_has(Model, base: str, subfield: str) -> bool:
@@ -95,7 +97,9 @@ def _related_has(Model, base: str, subfield: str) -> bool:
     True if Model.<base> is a relation and the related model actually has <subfield>.
     """
     f = _get_field(Model, base)
-    if not f or not getattr(f, "is_relation", False) or not getattr(f, "related_model", None):
+    if not f or not getattr(f, "is_relation", False) or not getattr(
+        f, "related_model", None
+    ):
         return False
     try:
         f.related_model._meta.get_field(subfield)
@@ -303,32 +307,105 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
 
 
 def _map_common(obj) -> Dict:
+    """
+    Map common dimension fields (entity, cost centre, contract, asset, project)
+    and support both FK relations AND plain text fields.
+
+    This is where we also ensure a text **project name** is available,
+    which the Project Profitability report uses.
+    """
     ent = getattr(obj, "entity", None)
     cc = getattr(obj, "cost_centre", None)
     con = getattr(obj, "contract", None)
     asst = getattr(obj, "asset", None)
     proj = getattr(obj, "project", None)
 
+    # ---- helper to get a human name ----
+    def _name_from(rel, extra_attr: Optional[str] = None):
+        if rel is None:
+            return None
+        # FK / object-like
+        for attr in ("name", "full_name", "code", extra_attr):
+            if not attr:
+                continue
+            if hasattr(rel, attr):
+                v = getattr(rel, attr)
+                if v:
+                    return str(v)
+        # Plain text / other object
+        if isinstance(rel, (int, float, Decimal)):
+            return None
+        return str(rel)
+
+    # base names
+    entity_name = _name_from(ent)
+    cost_centre_name = _name_from(cc)
+    contract_name = _name_from(con, "vendor_name")
+    asset_name = _name_from(asst)
+
+    # entity_type from Entity model (Property / Project / Contact / Internal)
+    entity_type = None
+    if ent is not None:
+        entity_type = (
+            getattr(ent, "entity_type", None)
+            or getattr(ent, "type", None)
+            or getattr(ent, "category", None)
+        )
+
+    # project object that might come from the entity
+    project_obj_from_entity = None
+    if ent is not None and isinstance(entity_type, str):
+        etype = entity_type.lower()
+        if etype.startswith("project"):
+            # prefer linked_project if present, otherwise treat entity itself as project
+            project_obj_from_entity = getattr(ent, "linked_project", None) or ent
+
+    # ---- project name resolution ----
+    # 1) direct project FK on the object (if any)
+    project_name = _name_from(proj)
+
+    # 2) explicit project_name column on the object
+    if not project_name and hasattr(obj, "project_name"):
+        project_name = getattr(obj, "project_name") or None
+
+    # 3) derive from entity when entity represents a project
+    if not project_name and project_obj_from_entity is not None:
+        project_name = _name_from(project_obj_from_entity)
+
     names = {
-        "entity": getattr(ent, "name", None),
-        "cost_centre": getattr(cc, "name", None),
-        "contract": getattr(con, "name", None) or getattr(con, "vendor_name", None),
-        "asset": getattr(asst, "name", None),
-        "project": getattr(proj, "name", None),
+        "entity": entity_name,
+        "cost_centre": cost_centre_name,
+        "contract": contract_name,
+        "asset": asset_name,
+        "project": project_name,
     }
+
+    # Also expose project_name explicitly if present on model –
+    # useful for some front-ends / reports that look for this key.
+    if hasattr(obj, "project_name"):
+        names["project_name"] = getattr(obj, "project_name") or project_name
+
+    # ---- IDs ----
+    project_id = getattr(obj, "project_id", None) or getattr(proj, "id", None)
+    if not project_id and project_obj_from_entity is not None:
+        project_id = getattr(project_obj_from_entity, "id", None)
+
     ids = {
         "entity_id": getattr(obj, "entity_id", None) or getattr(ent, "id", None),
         "cost_centre_id": getattr(obj, "cost_centre_id", None) or getattr(cc, "id", None),
         "contract_id": getattr(obj, "contract_id", None) or getattr(con, "id", None),
         "asset_id": getattr(obj, "asset_id", None) or getattr(asst, "id", None),
-        "project_id": getattr(obj, "project_id", None) or getattr(proj, "id", None),
+        "project_id": project_id,
     }
+
     remarks = (
         getattr(obj, "remarks", None)
         or getattr(obj, "description", None)
         or getattr(obj, "narration", None)
     )
-    return {**names, **ids, "remarks": remarks}
+
+    # include entity_type so reports can filter on it
+    return {**names, **ids, "entity_type": entity_type, "remarks": remarks}
 
 
 def _map_with_date_and_amount(obj, date_field: str) -> Optional[Dict]:
@@ -615,7 +692,14 @@ def unified_ledger(
                     rows.append(m)
 
     # 3) bank uploads — fallback only if classification not used
-    if not used_classify:
+    #    AND no specific entity/project/apartment filter is requested.
+    #    For owner/property statements we do NOT want global bank rows.
+    if (
+        not used_classify
+        and entity_id is None
+        and project_id is None
+        and apartment_id is None
+    ):
         BankModel = _smart_pick_model("bank_uploads", ("BankTransaction",))
         if BankModel:
             df = _pick_date_field(BankModel)
