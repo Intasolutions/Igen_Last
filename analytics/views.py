@@ -994,7 +994,7 @@ class OwnerRentalPropertyPatchView(APIView):
       - Rent
       - iGen Service Charge
       - Lease Start / Lease Expiry
-      - Agreem   - Flags: transaction_scheduled, email_sent
+      - Agreemion_scheduled, email_sent
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -1164,8 +1164,25 @@ class OwnerRentalPropertyStatementPDFView(APIView):
 
         if not rows and fallback_month:
             rows = _synthetic_property_statement_rows(prop, fallback_month)
-	
 
+        # --- HIDE ONLY tenant-side flows in Owner Statement PDF ---
+        # 1) "iGen service charge from tenant"
+        # 2) "Token received from tenant"
+        def _skip_owner_row(r):
+            t = (r.get("txn_type") or "").strip().lower()
+            rem = (r.get("remarks") or "").strip().lower()
+
+            # exact tenant-side service charge
+            if "igen service charge from tenant" in t or "igen service charge from tenant" in rem:
+                return True
+
+            # tenant-side token received
+            if "token received from tenant" in t or "token received from tenant" in rem:
+                return True
+
+            return False
+
+        rows = [r for r in rows if not _skip_owner_row(r)]
 
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = [
@@ -1194,7 +1211,7 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         owner_or_entity = owner_name or "Owner"
 
         # Heading: "OwnerName - PropertyCode - Period Owner Statement"
-        title = f"{owner_or_entity} - {prop_code} - {period_label} Owner Statement"
+        title = f"{owner_or_entity} - {prop_code} Owner Statement"
 
         pdf = export_simple_pdf(title, headers, table)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
@@ -1271,6 +1288,23 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
         if not rows and fallback_month:
             rows = _synthetic_property_statement_rows(prop, fallback_month)
 
+        # --- HIDE ONLY tenant-side flows in Owner Statement DOCX ---
+        # 1) "iGen service charge from tenant"
+        # 2) "Token received from tenant"
+        def _skip_owner_row(r):
+            t = (r.get("txn_type") or "").strip().lower()
+            rem = (r.get("remarks") or "").strip().lower()
+
+            if "igen service charge from tenant" in t or "igen service charge from tenant" in rem:
+                return True
+
+            if "token received from tenant" in t or "token received from tenant" in rem:
+                return True
+
+            return False
+
+        rows = [r for r in rows if not _skip_owner_row(r)]
+
         owner_name = (
             getattr(getattr(prop, "landlord", None), "full_name", None)
             or getattr(getattr(prop, "landlord", None), "name", None)
@@ -1285,7 +1319,9 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
 
         doc = Document()
         doc.add_heading(
-            f"{owner_or_entity} - {prop_code} - {period_label} Owner Statement", level=1
+            f"{owner_or_entity} - {prop_code} Owner Statement", level=1
+
+
         )
         p = doc.add_paragraph()
         p.add_run(f"Period: {period_label}").italic = True

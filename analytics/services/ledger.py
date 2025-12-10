@@ -143,11 +143,17 @@ def _txn_type_label(obj) -> Optional[str]:
 def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
     """
     Normalize to {credit,debit} across common schemas.
+
     Priority:
       1) Explicit pairs: (credit, debit) or (credit_amount, debit_amount)
       2) (deposit, withdrawal)
       3) signed_amount
-      4) amount/value (+ direction field, type name, or sign)
+      4) amount/value:
+         4a) use transaction_type direction (is_credit / is_debit / direction)
+         4b) use is_credit / is_debit on the object itself
+         4c) use direction-ish fields (cr_dr, txn_type, etc.)
+         4d) use name-based heuristics
+         4e) last fallback: sign of amount
     """
     # 1) credit/debit exact field names
     if hasattr(obj, "credit") or hasattr(obj, "debit"):
@@ -178,7 +184,7 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
             "debit": abs(sa) if sa < 0 else Decimal("0"),
         }
 
-    # 4) amount/value (+ optional directional hint)
+    # 4) amount/value (+ directional hints)
     amt = None
     for a in ("amount", "value", "txn_amount", "transaction_amount"):
         if hasattr(obj, a):
@@ -186,19 +192,41 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
             break
 
     if amt is not None:
-        # 4a) explicit boolean flags is_credit / is_debit
-        if hasattr(obj, "is_credit") or hasattr(obj, "is_debit"):
-            is_credit = bool(getattr(obj, "is_credit", False))
-            is_debit = bool(getattr(obj, "is_debit", False))
-            # if exactly one of them is true, trust it
-            if is_credit and not is_debit:
-                return {"credit": amt, "debit": Decimal("0")}
-            if is_debit and not is_credit:
-                return {"credit": Decimal("0"), "debit": amt}
-            # if both False or conflicting, fall through to other hints
+        # ---- 4a: direction from related TransactionType (main fix) ----
+        ttype = getattr(obj, "transaction_type", None)
+        if ttype is not None:
+            # explicit booleans on the transaction type
+            has_ttype_is_credit = hasattr(ttype, "is_credit")
+            has_ttype_is_debit = hasattr(ttype, "is_debit")
 
-        # 4b) direction fields: CR / DR / CREDIT / DEBIT etc.
-        # Also treat longer labels that *contain* "credit" / "debit"
+            if has_ttype_is_credit or has_ttype_is_debit:
+                is_cr = getattr(ttype, "is_credit", None)
+                is_dr = getattr(ttype, "is_debit", None)
+
+                # prefer explicit True values, and ignore None
+                if is_cr is True and is_dr is not True:
+                    return {"credit": amt, "debit": Decimal("0")}
+                if is_dr is True and is_cr is not True:
+                    return {"credit": Decimal("0"), "debit": amt}
+
+            # direction field: "Credit" / "Debit" / "CR" / "DR"
+            dir_val = str(getattr(ttype, "direction", "") or "").strip().lower()
+            if dir_val:
+                if dir_val in ("cr", "c") or dir_val.startswith("credit"):
+                    return {"credit": amt, "debit": Decimal("0")}
+                if dir_val in ("dr", "d") or dir_val.startswith("debit"):
+                    return {"credit": Decimal("0"), "debit": amt}
+
+        # ---- 4b: direction flags on the object itself ----
+        if hasattr(obj, "is_credit") or hasattr(obj, "is_debit"):
+            is_credit = getattr(obj, "is_credit", None)
+            is_debit = getattr(obj, "is_debit", None)
+            if is_credit is True and is_debit is not True:
+                return {"credit": amt, "debit": Decimal("0")}
+            if is_debit is True and is_credit is not True:
+                return {"credit": Decimal("0"), "debit": amt}
+
+        # ---- 4c: generic direction-ish fields on object itself ----
         for k in (
             "cr_dr",
             "dr_cr",
@@ -228,7 +256,7 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
             if val in ("dr", "d") or "debit" in val:
                 return {"credit": Decimal("0"), "debit": amt}
 
-        # 4c) transaction_type NAME heuristics (client specific)
+        # ---- 4d: transaction_type NAME heuristics (client specific) ----
         # Try to derive a clean text name even if transaction_type is a related object
         ttype_name = ""
         t = getattr(obj, "transaction_type", None)
@@ -295,7 +323,7 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
             if any(k in ttype_name for k in CREDIT_KEYWORDS):
                 return {"credit": amt, "debit": Decimal("0")}
 
-        # 4d) sign fallback (if we have no direction at all)
+        # ---- 4e: last fallback – rely on sign of amount ----
         return (
             {"credit": amt, "debit": Decimal("0")}
             if amt >= 0
