@@ -300,3 +300,9 @@ ANALYTICS_MI_TTYPE_ALIASES = env_list(
     "ANALYTICS_MI_TTYPE_ALIASES",
     ["maintenance", "interior", "m & i", "mi", "repairs", "upkeep"],
 )
+
+
+# ------------------------------------------------------------
+# Branding / PDF Logo
+# ------------------------------------------------------------
+IGEN_PDF_LOGO = BASE_DIR / "igen-frontend" / "public" / "logo" / "igenprpt.jpeg"
