@@ -1,4 +1,3 @@
-# analytics/services/ledger.py
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, List, Dict, Optional, Iterable as _Iterable
@@ -186,10 +185,17 @@ def _resolve_amount_pair(obj) -> Dict[str, Decimal]:
 
     # 4) amount/value (+ directional hints)
     amt = None
-    for a in ("amount", "value", "txn_amount", "transaction_amount"):
-        if hasattr(obj, a):
-            amt = _dec(getattr(obj, a))
-            break
+
+    # ✅ NEW: Prefer margin-aware effective_amount when the model provides it
+    # (e.g. tx_classify.Classification: amount + parsed_margin)
+    if hasattr(obj, "effective_amount"):
+        amt = _dec(getattr(obj, "effective_amount"))
+
+    if amt is None:
+        for a in ("amount", "value", "txn_amount", "transaction_amount"):
+            if hasattr(obj, a):
+                amt = _dec(getattr(obj, a))
+                break
 
     if amt is not None:
         # ---- 4a: direction from related TransactionType (main fix) ----
@@ -408,7 +414,7 @@ def _map_common(obj) -> Dict:
         "project": project_name,
     }
 
-    # Also expose project_name explicitly if present on model –
+    # Also expose project_name explicitly if present on model – 
     # useful for some front-ends / reports that look for this key.
     if hasattr(obj, "project_name"):
         names["project_name"] = getattr(obj, "project_name") or project_name
@@ -426,11 +432,14 @@ def _map_common(obj) -> Dict:
         "project_id": project_id,
     }
 
+    # ✅ Prefer cleaned_remarks if available (hides "Margin: xxx" from output)
     remarks = (
-        getattr(obj, "remarks", None)
+        getattr(obj, "cleaned_remarks", None)
+        or getattr(obj, "remarks", None)
         or getattr(obj, "description", None)
         or getattr(obj, "narration", None)
     )
+
 
     # include entity_type so reports can filter on it
     return {**names, **ids, "entity_type": entity_type, "remarks": remarks}

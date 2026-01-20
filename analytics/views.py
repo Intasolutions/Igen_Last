@@ -50,6 +50,55 @@ def _month_range(yyyy_mm: str):
     end = next_first - timedelta(days=1)
     return start, end
 
+def _months_between(from_yyyy_mm: str, to_yyyy_mm: str):
+    """
+    Returns a list of YYYY-MM strings from from_yyyy_mm to to_yyyy_mm inclusive.
+    Example: 2026-01 to 2026-03 => ["2026-01","2026-02","2026-03"]
+    """
+    fy, fm = map(int, from_yyyy_mm.split("-"))
+    ty, tm = map(int, to_yyyy_mm.split("-"))
+
+    start = date(fy, fm, 1)
+    end = date(ty, tm, 1)
+
+    # if user selects reverse order, swap
+    if start > end:
+        start, end = end, start
+
+    out = []
+    cur = start
+    while cur <= end:
+        out.append(f"{cur.year:04d}-{cur.month:02d}")
+        # increment month safely (no extra libs)
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+    return out
+
+
+def _statement_5th_range(yyyy_mm: str):
+    """
+    Returns (from_date, to_date) where:
+    - from_date = previous month 5th
+    - to_date   = current month 5th
+    Example:
+      2025-12 -> 2025-11-05 to 2025-12-05
+      2026-01 -> 2025-12-05 to 2026-01-05
+    """
+    y, m = map(int, yyyy_mm.split("-"))
+
+    # current month 5th
+    to_date = date(y, m, 5)
+
+    # previous month 5th
+    if m == 1:
+        from_date = date(y - 1, 12, 5)
+    else:
+        from_date = date(y, m - 1, 5)
+
+    return from_date, to_date
+
 
 def _dim_value(row, dim: str):
     """
@@ -239,22 +288,50 @@ class EntityStatementView(APIView):
 
     def get(self, request):
         entity_id = request.GET.get("entity_id")
-        month = request.GET.get("month")  # YYYY-MM
-        if not (entity_id and month):
+        month = request.GET.get("month")        # old: YYYY-MM
+        from_str = request.GET.get("from")      # new: YYYY-MM-DD
+        to_str = request.GET.get("to")          # new: YYYY-MM-DD
+
+        if not entity_id:
+            return Response({"detail": "entity_id required"}, status=400)
+
+        # ---------- MODE 1: old single-month ----------
+        if month:
+            start, end = _month_range(month)
+
+        # ---------- MODE 2: new date-range ----------
+        elif from_str and to_str:
+            from_date = parse_date(from_str)
+            to_date = parse_date(to_str)
+
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "from & to must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+
+            # swap if reversed
+            if from_date > to_date:
+                from_date, to_date = to_date, from_date
+
+            start, end = from_date, to_date
+
+        else:
             return Response(
-                {"detail": "entity_id & month (YYYY-MM) required"},
+                {"detail": "Provide either month (YYYY-MM) OR from & to (YYYY-MM-DD)."},
                 status=400,
             )
 
-        start, end = _month_range(month)
-        # Opening balance is strictly before start (exclusive)
+        # Opening balance strictly before start
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
+
         base_rows = unified_ledger(
             request.user,
             from_date=start,
             to_date=end,
             entity_id=int(entity_id),
         )
+
         rows = running_balance(base_rows, opening_balance=obal)
 
         data = [
@@ -271,19 +348,21 @@ class EntityStatementView(APIView):
         return Response(EntityStatementRowSerializer(data, many=True).data)
 
 
+
+
 class EntityStatementPDFView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         entity_id = request.GET.get("entity_id")
-        month = request.GET.get("month")
-        if not (entity_id and month):
-            return Response(
-                {"detail": "entity_id & month (YYYY-MM) required"},
-                status=400,
-            )
+        month = request.GET.get("month")        # old: YYYY-MM
+        from_str = request.GET.get("from")      # new: YYYY-MM-DD
+        to_str = request.GET.get("to")          # new: YYYY-MM-DD
 
-        # Nicely formatted heading: Owner/Entity Name + Property Code (if any) + Year-Month
+        if not entity_id:
+            return Response({"detail": "entity_id required"}, status=400)
+
+        # Entity display
         try:
             eid_int = int(entity_id)
         except Exception:
@@ -297,8 +376,36 @@ class EntityStatementPDFView(APIView):
             ent_name = f"Entity {entity_id}"
             ent_code = None
 
-        start, end = _month_range(month)
+        # ----- period selection -----
+        if month:
+            start, end = _month_range(month)
+            period_label = month
+
+        elif from_str and to_str:
+            from_date = parse_date(from_str)
+            to_date = parse_date(to_str)
+
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "from & to must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+
+            if from_date > to_date:
+                from_date, to_date = to_date, from_date
+
+            start, end = from_date, to_date
+            period_label = f"{start}_to_{end}"
+
+        else:
+            return Response(
+                {"detail": "Provide either month (YYYY-MM) OR from & to (YYYY-MM-DD)."},
+                status=400,
+            )
+
+        # Opening balance before start
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
+
         base_rows = unified_ledger(
             request.user,
             from_date=start,
@@ -310,7 +417,7 @@ class EntityStatementPDFView(APIView):
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = [
             [
-                r["value_date"].strftime("%Y-%m-%d"),
+                r["value_date"].strftime("%Y-%m-%d") if r.get("value_date") else "",
                 r.get("txn_type") or "",
                 str(r.get("credit") or 0),
                 str(r.get("debit") or 0),
@@ -320,24 +427,28 @@ class EntityStatementPDFView(APIView):
             for r in rows
         ]
 
-        # Heading: "OwnerName / EntityName - PropertyCode - YYYY-MM Statement"
+        # Title
         if ent_code:
-            title = f"{ent_name} - {ent_code} - {month} Statement"
+            title = f"{ent_name} - {ent_code} - {period_label} Statement"
         else:
-            title = f"{ent_name} - {month} Statement"
+            title = f"{ent_name} - {period_label} Statement"
 
         pdf = export_simple_pdf(title, headers, table)
         resp = HttpResponse(pdf.read(), content_type="application/pdf")
-        resp[
-            "Content-Disposition"
-        ] = f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{month}.pdf"'
+        resp["Content-Disposition"] = (
+            f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{period_label}.pdf"'
+        )
         return resp
+
+
 
 
 class EntityStatementDOCXView(APIView):
     """
-    Word export for Entity Statement (Report 1).
-    Requires python-docx. Returns 400 if params missing, 500 if python-docx unavailable.
+    Word export for Entity Statement.
+    Supports:
+      - entity_id + month (YYYY-MM)   [old]
+      - entity_id + from/to (YYYY-MM-DD) [new]
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -350,13 +461,14 @@ class EntityStatementDOCXView(APIView):
             )
 
         entity_id = request.GET.get("entity_id")
-        month = request.GET.get("month")
-        if not (entity_id and month):
-            return Response(
-                {"detail": "entity_id & month (YYYY-MM) required"},
-                status=400,
-            )
+        month = request.GET.get("month")        # old
+        from_str = request.GET.get("from")      # new
+        to_str = request.GET.get("to")          # new
 
+        if not entity_id:
+            return Response({"detail": "entity_id required"}, status=400)
+
+        # entity label
         try:
             eid_int = int(entity_id)
         except Exception:
@@ -365,10 +477,39 @@ class EntityStatementDOCXView(APIView):
         if eid_int is not None:
             ent_label = _get_entity_display(eid_int)
             ent_name = ent_label["name"]
+            ent_code = ent_label.get("code")
         else:
             ent_name = f"Entity {entity_id}"
+            ent_code = None
 
-        start, end = _month_range(month)
+        # ----- period selection -----
+        if month:
+            start, end = _month_range(month)
+            period_label = month
+
+        elif from_str and to_str:
+            from_date = parse_date(from_str)
+            to_date = parse_date(to_str)
+
+            if not (from_date and to_date):
+                return Response(
+                    {"detail": "from & to must be valid dates (YYYY-MM-DD)."},
+                    status=400,
+                )
+
+            if from_date > to_date:
+                from_date, to_date = to_date, from_date
+
+            start, end = from_date, to_date
+            period_label = f"{start}_to_{end}"
+
+        else:
+            return Response(
+                {"detail": "Provide either month (YYYY-MM) OR from & to (YYYY-MM-DD)."},
+                status=400,
+            )
+
+        # data
         obal = opening_balance_until(request.user, start, entity_id=int(entity_id))
         base_rows = unified_ledger(
             request.user,
@@ -378,12 +519,16 @@ class EntityStatementDOCXView(APIView):
         )
         rows = running_balance(base_rows, opening_balance=obal)
 
+        # build docx
         doc = Document()
-        doc.add_heading(f"{ent_name} - Monthly Statement", level=1)
-        p = doc.add_paragraph()
-        p.add_run(f"Period: {month}").italic = True
+        title = f"{ent_name} - Statement"
+        if ent_code:
+            title = f"{ent_name} - {ent_code} - Statement"
+        doc.add_heading(title, level=1)
 
-        # Table: headers + rows
+        p = doc.add_paragraph()
+        p.add_run(f"Period: {period_label}").italic = True
+
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = doc.add_table(rows=1, cols=len(headers))
         hdr_cells = table.rows[0].cells
@@ -395,7 +540,9 @@ class EntityStatementDOCXView(APIView):
 
         for r in rows:
             row_cells = table.add_row().cells
-            row_cells[0].text = r["value_date"].strftime("%Y-%m-%d")
+            row_cells[0].text = (
+                r["value_date"].strftime("%Y-%m-%d") if r.get("value_date") else ""
+            )
             row_cells[1].text = str(r.get("txn_type") or "")
             row_cells[2].text = str(r.get("credit") or 0)
             row_cells[3].text = str(r.get("debit") or 0)
@@ -405,6 +552,7 @@ class EntityStatementDOCXView(APIView):
         bio = BytesIO()
         doc.save(bio)
         bio.seek(0)
+
         resp = HttpResponse(
             bio.getvalue(),
             content_type=(
@@ -412,10 +560,11 @@ class EntityStatementDOCXView(APIView):
                 "wordprocessingml.document"
             ),
         )
-        resp[
-            "Content-Disposition"
-        ] = f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{month}.docx"'
+        resp["Content-Disposition"] = (
+            f'attachment; filename="entity_statement_{_safe_filename_part(ent_name)}_{period_label}.docx"'
+        )
         return resp
+
 
 
 class EntityStatementExcelView(APIView):
@@ -737,7 +886,8 @@ def _synthetic_property_statement_rows(prop: Property, month: str):
     This ensures the owner always gets something from the Owner Dashboard,
     even before a full ledger integration is in place.
     """
-    start, _ = _month_range(month)
+    start, _ = _statement_5th_range(month)
+
 
     # Pick rent: monthly_rent → expected_rent → rent → 0
     rent = getattr(prop, "monthly_rent", None)
@@ -1156,14 +1306,28 @@ class OwnerRentalPropertyStatementPDFView(APIView):
                     {"detail": "Either month (YYYY-MM) or from/to is required."},
                     status=400,
                 )
-            from_date, to_date = _month_range(month)
-            period_label = month
+            from_date, to_date = _statement_5th_range(month)
+            period_label = f"{from_date} to {to_date}"
             fallback_month = month
 
         rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
 
-        if not rows and fallback_month:
-            rows = _synthetic_property_statement_rows(prop, fallback_month)
+        if not rows:
+            # If user gave explicit from/to, don't generate synthetic month rows (they confuse range statements)
+            if from_str or to_str:
+                rows = [
+                    {
+                        "value_date": from_date,
+                        "txn_type": "",
+                        "credit": Decimal("0"),
+                        "debit": Decimal("0"),
+                        "balance": Decimal("0"),
+                        "remarks": f"No transactions recorded for {from_date} to {to_date}.",
+                    }
+                ]
+            elif fallback_month:
+                # month mode fallback is OK
+                rows = _synthetic_property_statement_rows(prop, fallback_month)
 
         # --- HIDE ONLY tenant-side flows in Owner Statement PDF ---
         # 1) "iGen service charge from tenant"
@@ -1226,6 +1390,8 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         return resp
 
 
+
+
 class OwnerRentalPropertyStatementDOCXView(APIView):
     """
     Generate statement for a single property as Word.
@@ -1280,8 +1446,8 @@ class OwnerRentalPropertyStatementDOCXView(APIView):
                     {"detail": "Either month (YYYY-MM) or from/to is required."},
                     status=400,
                 )
-            from_date, to_date = _month_range(month)
-            period_label = month
+            from_date, to_date = _statement_5th_range(month)
+            period_label = f"{from_date} to {to_date}"
             fallback_month = month
 
         rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
@@ -1415,8 +1581,8 @@ class OwnerRentalPropertyStatementExcelView(APIView):
                     {"detail": "Either month (YYYY-MM) or from/to is required."},
                     status=400,
                 )
-            from_date, to_date = _month_range(month)
-            period_label = month
+            from_date, to_date = _statement_5th_range(month)
+            period_label = f"{from_date} to {to_date}"
             fallback_month = month
 
         rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
