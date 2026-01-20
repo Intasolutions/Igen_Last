@@ -10,7 +10,8 @@ import {
   Table,
   Pagination,
   inr,
-  currentMonth,
+  thisYearStart,
+  todayLocal,
   SearchableEntityDropdown,
   openEntityStatementPDF,
   openEntityStatementDOCX,
@@ -18,7 +19,11 @@ import {
 
 function EntityStatement() {
   const [entity, setEntity] = useState(null); // {id,name}
-  const [month, setMonth] = useState(currentMonth());
+
+  // Date range (YYYY-MM-DD)
+  const [from, setFrom] = useState(thisYearStart());
+  const [to, setTo] = useState(todayLocal());
+
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
@@ -26,21 +31,30 @@ function EntityStatement() {
   const [page, setPage] = useState(1);
   const pageSize = 25;
 
-  useEffect(() => {
-    setPage(1);
-  }, [rows]);
+  useEffect(() => setPage(1), [rows]);
 
   const paginatedRows = useMemo(
     () => rows.slice((page - 1) * pageSize, page * pageSize),
     [rows, page]
   );
 
+  const canRun = !!(entity && from && to);
+
+  const getSortedRange = () => {
+    const f = from <= to ? from : to;
+    const t = from <= to ? to : from;
+    return { f, t };
+  };
+
   const load = async () => {
-    if (!entity || !month) return;
+    if (!canRun) return;
+
+    const { f, t } = getSortedRange();
+
     setLoading(true);
     try {
       const res = await API.get("analytics/entity-statement/", {
-        params: { entity_id: entity.id, month },
+        params: { entity_id: entity.id, from: f, to: t },
       });
       setRows(res.data || []);
     } catch (e) {
@@ -52,9 +66,13 @@ function EntityStatement() {
   };
 
   const downloadPDF = async () => {
-    if (!entity || !month) return;
+    if (!canRun) return;
+
+    const { f, t } = getSortedRange();
+
     try {
-      await openEntityStatementPDF(entity.id, month);
+      // PDF backend now supports from/to
+      await openEntityStatementPDF(entity.id, { from: f, to: t });
     } catch (e) {
       console.error(e);
       alert("Could not export PDF.");
@@ -62,9 +80,13 @@ function EntityStatement() {
   };
 
   const downloadDOCX = async () => {
-    if (!entity || !month) return;
+    if (!canRun) return;
+
+    const { f, t } = getSortedRange();
+
     try {
-      await openEntityStatementDOCX(entity.id, month);
+      // DOCX backend now supports from/to (since you updated it)
+      await openEntityStatementDOCX(entity.id, { from: f, to: t });
     } catch (e) {
       console.error(e);
       alert("Could not export Word.");
@@ -74,17 +96,17 @@ function EntityStatement() {
   return (
     <div className="space-y-4">
       <Card
-        title="Entity-wise Monthly Statement"
-        subtitle="Drill into a single entity for a specific month"
+        title="Entity Statement"
+        subtitle="Drill into a single entity for a date range"
         right={
           <div className="hidden sm:flex gap-2">
-            <Button variant="outline" onClick={load} disabled={!entity || !month}>
+            <Button variant="outline" onClick={load} disabled={!canRun}>
               Load
             </Button>
-            <Button variant="outline" onClick={downloadPDF} disabled={!entity || !month}>
+            <Button variant="outline" onClick={downloadPDF} disabled={!canRun}>
               Export PDF
             </Button>
-            <Button onClick={downloadDOCX} disabled={!entity || !month}>
+            <Button onClick={downloadDOCX} disabled={!canRun}>
               Export Word
             </Button>
           </div>
@@ -95,27 +117,43 @@ function EntityStatement() {
             <Label>Entity</Label>
             <SearchableEntityDropdown value={entity} onChange={setEntity} />
           </div>
+
           <div>
-            <Label>Month</Label>
+            <Label>From</Label>
             <Input
-              type="month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
               style={{ width: 160 }}
             />
           </div>
+
+          <div>
+            <Label>To</Label>
+            <Input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              style={{ width: 160 }}
+            />
+          </div>
+
           <div className="flex gap-2 sm:hidden">
-            <Button variant="outline" onClick={load} disabled={!entity || !month}>
+            <Button variant="outline" onClick={load} disabled={!canRun}>
               Load
             </Button>
-            <Button variant="outline" onClick={downloadPDF} disabled={!entity || !month}>
+            <Button variant="outline" onClick={downloadPDF} disabled={!canRun}>
               Export PDF
             </Button>
-            <Button onClick={downloadDOCX} disabled={!entity || !month}>
+            <Button onClick={downloadDOCX} disabled={!canRun}>
               Export Word
             </Button>
           </div>
         </Toolbar>
+
+        <div className="mt-2 text-xs text-gray-500">
+          Note: PDF and Word exports use the selected <b>From</b> and <b>To</b> dates.
+        </div>
       </Card>
 
       <Card title="Transactions" subtitle="With running balance">
@@ -143,6 +181,7 @@ function EntityStatement() {
               </td>
             </tr>
           )}
+
           {!loading && rows.length === 0 && (
             <tr>
               <td className="px-3 py-8 text-gray-500" colSpan={6}>
@@ -150,6 +189,7 @@ function EntityStatement() {
               </td>
             </tr>
           )}
+
           {!loading &&
             paginatedRows.map((r, i) => (
               <tr key={i} className="hover:bg-gray-50">

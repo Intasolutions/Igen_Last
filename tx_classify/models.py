@@ -110,4 +110,22 @@ class Classification(models.Model):
         """
         if not self.remarks:
             return None
-        return re.sub(r"\s*\|?\s*Margin:\s*[0-9]+(?:\.[0-9]{1,2})?", "", self.remarks).strip() or None
+        return (
+            re.sub(
+                r"\s*\|?\s*Margin:\s*[0-9]+(?:\.[0-9]{1,2})?",
+                "",
+                self.remarks,
+            ).strip()
+            or None
+        )
+
+    @property
+    def effective_amount(self) -> Decimal:
+        """
+        NEW: amount INCLUDING margin (if any).
+        Use this for ledger / statement / opening-balance calculations,
+        so that 'Margin: X' is actually reflected in the debit/credit.
+        """
+        base = self.amount or Decimal("0")
+        margin = self.parsed_margin or Decimal("0")
+        return base + margin

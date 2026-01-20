@@ -230,14 +230,40 @@ export const Metric = ({ title, value, tone = "blue" }) => {
 };
 
 // ----------------------------- PDF / DOCX helpers -----------------------------
-export async function openEntityStatementPDF(entityId, month) {
+// UPDATED: Entity statement helpers (support month OR from/to)
+export async function openEntityStatementPDF(entityId, options) {
   if (!entityId) {
     alert("No entity linked to this row.");
     return;
   }
+
+  let month = null;
+  let from = null;
+  let to = null;
+
+  // Backward compatible: second arg can be month string or options object
+  if (typeof options === "string") {
+    month = options;
+  } else if (options && typeof options === "object") {
+    month = options.month || null;
+    from = options.from || null;
+    to = options.to || null;
+  }
+
+  const params = { entity_id: entityId };
+  if (from && to) {
+    params.from = from;
+    params.to = to;
+  } else if (month) {
+    params.month = month;
+  } else {
+    alert("Please select either a month or a From / To date range before generating.");
+    return;
+  }
+
   try {
     const res = await API.get("analytics/entity-statement/pdf/", {
-      params: { entity_id: entityId, month },
+      params,
       responseType: "blob",
       validateStatus: (s) => s >= 200 && s < 500,
     });
@@ -259,7 +285,10 @@ export async function openEntityStatementPDF(entityId, month) {
 
     const cd = res.headers?.["content-disposition"] || "";
     const m = cd.match(/filename="?([^"]+)"?/i);
-    const filename = m?.[1] || `entity_${entityId}_${month}_statement.pdf`;
+    const suffix =
+      month || (from && to ? `${from}_to_${to}` : "statement");
+    const fallbackName = `entity_${entityId}_${suffix}_statement.pdf`;
+    const filename = m?.[1] || fallbackName;
 
     const a = document.createElement("a");
     a.href = url;
@@ -278,14 +307,38 @@ export async function openEntityStatementPDF(entityId, month) {
   }
 }
 
-export async function openEntityStatementDOCX(entityId, month) {
+export async function openEntityStatementDOCX(entityId, options) {
   if (!entityId) {
     alert("No entity linked to this row.");
     return;
   }
+
+  let month = null;
+  let from = null;
+  let to = null;
+
+  if (typeof options === "string") {
+    month = options;
+  } else if (options && typeof options === "object") {
+    month = options.month || null;
+    from = options.from || null;
+    to = options.to || null;
+  }
+
+  const params = { entity_id: entityId };
+  if (from && to) {
+    params.from = from;
+    params.to = to;
+  } else if (month) {
+    params.month = month;
+  } else {
+    alert("Please select either a month or a From / To date range before generating.");
+    return;
+  }
+
   try {
     const res = await API.get("analytics/entity-statement/docx/", {
-      params: { entity_id: entityId, month },
+      params,
       responseType: "blob",
       validateStatus: (s) => s >= 200 && s < 500,
     });
@@ -309,7 +362,10 @@ export async function openEntityStatementDOCX(entityId, month) {
 
     const cd = res.headers?.["content-disposition"] || "";
     const m = cd.match(/filename="?([^"]+)"?/i);
-    const filename = m?.[1] || `entity_${entityId}_${month}_statement.docx`;
+    const suffix =
+      month || (from && to ? `${from}_to_${to}` : "statement");
+    const fallbackName = `entity_${entityId}_${suffix}_statement.docx`;
+    const filename = m?.[1] || fallbackName;
 
     const a = document.createElement("a");
     a.href = url;
