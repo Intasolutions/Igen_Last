@@ -1313,21 +1313,17 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         rows = _statement_rows_for_property(request.user, prop, from_date, to_date)
 
         if not rows:
-            # If user gave explicit from/to, don't generate synthetic month rows (they confuse range statements)
-            if from_str or to_str:
-                rows = [
-                    {
-                        "value_date": from_date,
-                        "txn_type": "",
-                        "credit": Decimal("0"),
-                        "debit": Decimal("0"),
-                        "balance": Decimal("0"),
-                        "remarks": f"No transactions recorded for {from_date} to {to_date}.",
-                    }
-                ]
-            elif fallback_month:
-                # month mode fallback is OK
-                rows = _synthetic_property_statement_rows(prop, fallback_month)
+           rows = [
+                {
+                    "value_date": from_date,
+                    "txn_type": "",
+                    "credit": Decimal("0"),
+                    "debit": Decimal("0"),
+                    "balance": Decimal("0"),
+                    "remarks": f"No transactions recorded for {from_date} to {to_date}.",
+                }
+            ]
+
 
         # --- HIDE ONLY tenant-side flows in Owner Statement PDF ---
         # 1) "iGen service charge from tenant"

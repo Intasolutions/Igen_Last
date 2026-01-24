@@ -32,6 +32,7 @@ import EditIcon from '@mui/icons-material/Edit';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import CloseIcon from '@mui/icons-material/Close';
+import SortIcon from '@mui/icons-material/Sort';
 
 import API from '../../api/axios';
 import SplitModal from './SplitModal';
@@ -60,7 +61,7 @@ const extractApiError = (e) => {
 // Build prefill rows for SplitModal from current flattened table rows
 const buildInitialSplitRows = (allRows, txnId) => {
   const children = allRows
-    .filter((r) => r.is_split_child && r.parent_transaction_id === txnId) // Adjust based on actual field
+    .filter((r) => r.is_split_child && r.parent_transaction_id === txnId)
     .map((r) => r.child)
     .filter(Boolean);
 
@@ -134,6 +135,9 @@ const TxClassifyPage = () => {
   const [minAmount, setMinAmount] = useState('');
   const [maxAmount, setMaxAmount] = useState('');
   const [unclassifiedOnly, setUnclassifiedOnly] = useState(true);
+  
+  // Sorting State (Default ASC)
+  const [sortOrder, setSortOrder] = useState('asc'); 
 
   // pagination
   const [limit, setLimit] = useState(200);
@@ -182,6 +186,8 @@ const TxClassifyPage = () => {
         unclassified_only: unclassifiedOnly ? '1' : '0',
         flatten_splits: '1',
         include_children: '1',
+        // Attempt server-side sorting if supported
+        ordering: sortOrder === 'asc' ? 'transaction_date' : '-transaction_date',
       });
       if (startDate) params.append('start_date', startDate);
       if (endDate) params.append('end_date', endDate);
@@ -203,24 +209,44 @@ const TxClassifyPage = () => {
 
   useEffect(() => {
     fetchUnclassified();
-  }, [selectedBankAccount, type, startDate, endDate, minAmount, maxAmount, unclassifiedOnly, limit, offset]);
+  }, [selectedBankAccount, type, startDate, endDate, minAmount, maxAmount, unclassifiedOnly, limit, offset, sortOrder]);
 
+  // Combined Search and Sort Logic (Client-Side Enforcement)
   const filtered = useMemo(() => {
-    if (!search.trim()) return rows;
-    const term = search.trim().toLowerCase();
-    return rows.filter((r) => {
-      const searchableFields = [
-        r.narration || '',
-        r.utr_number || '',
-        r.transaction_date || '',
-        r.child?.transaction_type || '',
-        r.child?.cost_centre || '',
-        r.child?.entity || '',
-        r.child?.remarks || '',
-      ].join(' ').toLowerCase();
-      return searchableFields.includes(term);
+    let result = [...rows];
+
+    // 1. Search Filter
+    if (search.trim()) {
+      const term = search.trim().toLowerCase();
+      result = result.filter((r) => {
+        const searchableFields = [
+          r.narration || '',
+          r.utr_number || '',
+          r.transaction_date || '',
+          r.child?.transaction_type || '',
+          r.child?.cost_centre || '',
+          r.child?.entity || '',
+          r.child?.remarks || '',
+        ].join(' ').toLowerCase();
+        return searchableFields.includes(term);
+      });
+    }
+
+    // 2. Sort Filter (Client-Side Enforcement)
+    // This ensures the UI reflects the order even if the API ignores the param
+    result.sort((a, b) => {
+      const dateA = new Date(a.transaction_date);
+      const dateB = new Date(b.transaction_date);
+      
+      if (sortOrder === 'asc') {
+        return dateA - dateB;
+      } else {
+        return dateB - dateA;
+      }
     });
-  }, [rows, search]);
+
+    return result;
+  }, [rows, search, sortOrder]);
 
   // Openers
   const onOpenSplit = (row) => {
@@ -300,6 +326,7 @@ const TxClassifyPage = () => {
     setEndDate('');
     setMinAmount('');
     setMaxAmount('');
+    setSortOrder('asc'); // Reset to default ASC
     setUnclassifiedOnly(true);
     setOffset(0);
   };
@@ -477,6 +504,33 @@ const TxClassifyPage = () => {
             InputLabelProps={{ sx: { color: 'grey.600', fontWeight: 500 } }}
             sx={{ width: 140, '& .MuiInputBase-root': { ...themeStyles.inputBase, '& input': { py: 1.4 } } }}
           />
+          
+          {/* Sort Order Filter */}
+          <Select
+            size="small"
+            value={sortOrder}
+            onChange={(e) => { setSortOrder(e.target.value); setOffset(0); }}
+            sx={{
+              minWidth: 160,
+              ...themeStyles.inputBase,
+              '& .MuiSelect-select': { py: 1.4, pl: 2 },
+              '& .MuiSvgIcon-root': { color: 'grey.500' },
+            }}
+          >
+            <MenuItem value="asc">
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                <SortIcon sx={{ transform: 'scaleY(-1)' }} /> 
+                Date: Oldest (ASC)
+              </Box>
+            </MenuItem>
+            <MenuItem value="desc">
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                <SortIcon /> 
+                Date: Newest (DESC)
+              </Box>
+            </MenuItem>
+          </Select>
+
           <Select
             size="small"
             value={type}
@@ -671,7 +725,7 @@ const TxClassifyPage = () => {
                         </IconButton>
                       </TableCell>
                       <TableCell>{r.transaction_date}</TableCell>
-                    
+                      
               
                       <TableCell sx={{ color: '#2e7d32' }}>{renderCredit(r)}</TableCell>
                       <TableCell sx={{ color: '#d32f2f' }}>{renderDebit(r)}</TableCell>
@@ -681,21 +735,6 @@ const TxClassifyPage = () => {
                       <TableCell>{r.utr_number || '—'}</TableCell>
                       <TableCell align="right">
                         <Stack direction="row" spacing={1} justifyContent="flex-end" onClick={(e) => e.stopPropagation()}>
-                          {/* <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<ClassifyIcon />}
-                            onClick={() => onOpenSingle(r)}
-                            disabled={!isUnclassifiedParent}
-                            sx={{
-                              ...themeStyles.button,
-                              borderColor: 'grey.300',
-                              color: '#1976d2',
-                              px: 2,
-                            }}
-                          >
-                            Classify
-                          </Button> */}
                           <Button
                             size="small"
                             variant="contained"
@@ -748,7 +787,7 @@ const TxClassifyPage = () => {
                             </Typography>
                             <Typography variant="body2">Narration: {r.narration}</Typography>
                             <Typography variant="body2">Classification: {isChild ? renderChildSummary(r.child) : '—'}</Typography>
-                           
+                            
                           </Box>
                         </Collapse>
                       </TableCell>
