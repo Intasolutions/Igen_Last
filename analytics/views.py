@@ -1347,7 +1347,7 @@ class OwnerRentalPropertyStatementPDFView(APIView):
         headers = ["Date", "Type", "Credit", "Debit", "Balance", "Remarks"]
         table = [
             [
-                r["value_date"].strftime("%Y-%m-%d") if r.get("value_date") else "",
+                r["value_date"].strftime("%d/%m/%Y") if r.get("value_date") else "",
                 r.get("txn_type") or "",
                 str(r.get("credit") or 0),
                 str(r.get("debit") or 0),
