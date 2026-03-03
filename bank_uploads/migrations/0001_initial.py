@@ -4,6 +4,8 @@ import django.db.models.deletion
 import uuid
 from django.conf import settings
 from django.db import migrations, models
+import os
+USE_SQLITE = os.environ.get("USE_SQLITE", "False").lower() in ("true", "1", "yes")
 
 
 class Migration(migrations.Migration):
@@ -73,8 +75,12 @@ class Migration(migrations.Migration):
             model_name='banktransaction',
             index=models.Index(fields=['utr_number'], name='bank_upload_utr_num_cae1d3_idx'),
         ),
-        migrations.AddConstraint(
-            model_name='banktransaction',
-            constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('bank_account', 'dedupe_key'), name='uniq_txn_per_account_dedupekey_active'),
-        ),
     ]
+
+    if not USE_SQLITE:
+        operations.append(
+            migrations.AddConstraint(
+                model_name='banktransaction',
+                constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('bank_account', 'dedupe_key'), name='uniq_txn_per_account_dedupekey_active'),
+            ),
+        )

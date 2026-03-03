@@ -9,6 +9,9 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+import os
+
+USE_SQLITE = os.environ.get("USE_SQLITE", "False").lower() in ("true", "1", "yes")
 
 
 class ActiveTransactionManager(models.Manager):
@@ -105,13 +108,15 @@ class BankTransaction(models.Model):
             models.Index(fields=['utr_number']),
         ]
         # Prevent duplicates per bank account (ignore soft-deleted rows)
-        constraints = [
-            models.UniqueConstraint(
-                fields=['bank_account', 'dedupe_key'],
-                condition=Q(is_deleted=False),
-                name='uniq_txn_per_account_dedupekey_active'
-            )
-        ]
+        constraints = []
+        if not USE_SQLITE:
+            constraints = [
+                models.UniqueConstraint(
+                    fields=['bank_account', 'dedupe_key'],
+                    condition=Q(is_deleted=False),
+                    name='uniq_txn_per_account_dedupekey_active'
+                )
+            ]
 
     # ---------- normalization helpers ----------
     @staticmethod

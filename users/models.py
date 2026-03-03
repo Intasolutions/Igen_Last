@@ -6,7 +6,8 @@ from companies.models import Company
 # >>> ADDED: imports for reset tokens and timestamps
 from django.utils import timezone  # >>> ADDED
 import secrets  # >>> ADDED
-
+import os
+USE_SQLITE = os.environ.get("USE_SQLITE", "False").lower() in ("true", "1", "yes")
 
 # ---------- Soft delete helpers ----------
 class SoftDeleteQuerySet(models.QuerySet):
@@ -121,15 +122,17 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     class Meta:
         ordering = ["-created_at"]
-        constraints = [
-            # Enforce case-insensitive uniqueness for email when present.
-            # Postgres only. If using MySQL/SQLite, remove this constraint.
-            models.UniqueConstraint(
-                Lower("email"),
-                name="uniq_user_email_lower",
-                condition=models.Q(email__isnull=False),
-            ),
-        ]
+        constraints = []
+        if not USE_SQLITE:
+            constraints = [
+                # Enforce case-insensitive uniqueness for email when present.
+                # Postgres only. If using MySQL/SQLite, remove this constraint.
+                models.UniqueConstraint(
+                    Lower("email"),
+                    name="uniq_user_email_lower",
+                    condition=models.Q(email__isnull=False),
+                ),
+            ]
         indexes = [
             models.Index(fields=["role"], name="idx_user_role"),
             models.Index(fields=["user_id"], name="idx_user_userid"),

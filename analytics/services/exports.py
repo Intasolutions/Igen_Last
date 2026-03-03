@@ -86,6 +86,7 @@ _MONEY_HEADERS = {
     "net",
     "margin",
     "igen_sc_this_month",
+    "rent_to_be_collected",
     "expected_rent_this_month",
 }
 

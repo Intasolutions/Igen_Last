@@ -59,9 +59,8 @@ export const Label = ({ children }) => (
 export const Input = (props) => (
   <input
     {...props}
-    className={`h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 ${
-      props.className || ""
-    }`}
+    className={`h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 ${props.className || ""
+      }`}
   />
 );
 
@@ -186,11 +185,10 @@ export const ExportMenu = ({
 export const Tab = ({ active, onClick, children }) => (
   <button
     onClick={onClick}
-    className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
-      active
+    className={`rounded-xl px-3 py-2 text-sm font-medium transition ${active
         ? "bg-gray-900 text-white"
         : "bg-white text-gray-900 border border-gray-200 hover:bg-gray-50"
-    }`}
+      }`}
   >
     {children}
   </button>
@@ -204,9 +202,8 @@ export const Table = ({ headers, children, foot }) => (
           {headers.map((h, i) => (
             <th
               key={i}
-              className={`px-3 py-2 text-left font-semibold ${
-                i === headers.length - 1 ? "pr-4" : ""
-              }`}
+              className={`px-3 py-2 text-left font-semibold ${i === headers.length - 1 ? "pr-4" : ""
+                }`}
             >
               {h}
             </th>
@@ -219,10 +216,10 @@ export const Table = ({ headers, children, foot }) => (
   </div>
 );
 
-export const Metric = ({ title, value, tone = "blue" }) => {
+export const Metric = ({ title, value, tone = "blue", tooltip }) => {
   const t = toneClass[tone] || toneClass.blue;
   return (
-    <div className={`rounded-xl border border-gray-200 p-4 ${t.bg}`}>
+    <div className={`rounded-xl border border-gray-200 p-4 ${t.bg}`} title={tooltip}>
       <div className={`text-xs ${t.text}`}>{title}</div>
       <div className="mt-1 text-lg font-semibold text-gray-900">{value}</div>
     </div>
@@ -671,9 +668,8 @@ export function SearchableEntityDropdown({ value, onChange }) {
                   data-idx={i}
                   onMouseDown={() => selectItem(opt)}
                   onMouseEnter={() => setHighlight(i)}
-                  className={`px-3 py-2 text-sm cursor-pointer ${
-                    i === highlight ? "bg-gray-100" : "hover:bg-gray-50"
-                  }`}
+                  className={`px-3 py-2 text-sm cursor-pointer ${i === highlight ? "bg-gray-100" : "hover:bg-gray-50"
+                    }`}
                   title={`${opt.name} #${opt.id}`}
                 >
                   {opt.name} <span className="text-gray-400">#{opt.id}</span>

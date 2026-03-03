@@ -22,6 +22,7 @@ from .views import (
     # R3 – Owner rental
     OwnerRentalSummaryView,
     OwnerRentalPropertiesView,
+    OwnerRentalPendingPropertiesView, # ← NEW
     OwnerRentalPropertyPatchView,
     OwnerRentalPropertyStatementPDFView,    # ← NEW
     OwnerRentalPropertyStatementDOCXView,   # ← NEW
@@ -66,6 +67,11 @@ urlpatterns = [
         "owner-rental/property/<int:pk>/",
         OwnerRentalPropertyPatchView.as_view(),
         name="owner-rental-property-patch",
+    ),
+    path(
+        "owner-rental/pending-list/",
+        OwnerRentalPendingPropertiesView.as_view(),
+        name="owner-rental-pending-list",
     ),
     path(
         "owner-rental/property-statement/pdf/",

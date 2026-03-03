@@ -11,6 +11,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from tx_classify.models import Classification
 from analytics.models import OwnerRentalFlag
 
 # Optional Word export (python-docx)
@@ -961,7 +962,7 @@ class OwnerRentalSummaryView(APIView):
                         "vacant": 0,
                         "care": 0,
                         "sale": 0,
-                        "expected_rent_this_month": "0",
+                        "rent_to_be_collected": "0",
                         "igen_sc_this_month": "0",
                         "inspections_30d": 0,
                         "to_be_vacated_30d": 0,
@@ -970,7 +971,6 @@ class OwnerRentalSummaryView(APIView):
             )
 
         qs = PropertyModel.objects.all()
-        # Basic scoping by user's companies if available
         user = request.user
         companies_rel = getattr(user, "companies", None)
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
@@ -979,91 +979,178 @@ class OwnerRentalSummaryView(APIView):
             except Exception:
                 pass
 
-        rented = (
-            qs.filter(status__iexact="occupied").count()
-            if hasattr(PropertyModel, "status")
-            else 0
-        )
-        vacant = (
-            qs.filter(status__iexact="vacant").count()
-            if hasattr(PropertyModel, "status")
-            else 0
-        )
-        care = (
-            qs.filter(purpose__iexact="care").count()
-            if hasattr(PropertyModel, "purpose")
-            else 0
-        )
-        sale = (
-            qs.filter(purpose__iexact="sale").count()
-            if hasattr(PropertyModel, "purpose")
-            else 0
-        )
+        # Parse requested month
+        month_str = request.GET.get("month") or date.today().strftime("%Y-%m")
+        m_start, m_end = _month_range(month_str)
+        days_in_month = Decimal(str((m_end - m_start).days + 1))
 
-        # Prefer monthly_rent; fall back to expected_rent
-        rent_field = (
-            "monthly_rent"
-            if hasattr(PropertyModel, "monthly_rent")
-            else ("expected_rent" if hasattr(PropertyModel, "expected_rent") else None)
-        )
-        exp_rent = 0
-        if rent_field:
-            exp_rent = (
-                qs.filter(status__iexact="occupied")
-                .aggregate(x=Sum(rent_field))
-                .get("x")
-                or 0
-            )
+        # Stats to compute
+        rented_contribution_count = 0
+        rent_sum = Decimal("0")
+        sc_sum = Decimal("0")
 
-        sc_field = (
-            "igen_service_charge" if hasattr(PropertyModel, "igen_service_charge") else None
-        )
-        igen_sc = 0
-        if sc_field:
-            igen_sc = (
-                qs.filter(status__iexact="occupied").aggregate(x=Sum(sc_field)).get("x") or 0
-            )
+        for p in qs:
+            # TC-06/08: Strict Status Validation (Strip + Lowercase)
+            status_str = (getattr(p, "status", "") or "").strip().lower()
+            if status_str != "occupied":
+                continue
+
+            # TC-12/13: Monthly Rent check
+            base_rent = getattr(p, "monthly_rent", Decimal("0")) or Decimal("0")
+            base_sc = getattr(p, "igen_service_charge", Decimal("0")) or Decimal("0")
+            
+            l_start = getattr(p, "lease_start_date", None)
+            l_end = getattr(p, "lease_end_date", None)
+            
+            # TC-14: Invalid date guard
+            if l_start and l_end and l_end < l_start:
+                continue
+
+            # Overlap Logic (TC-01 to TC-05, TC-09 to TC-11)
+            actual_start = max(l_start, m_start) if l_start else m_start
+            actual_end = min(l_end or m_end, m_end)
+            
+            if actual_end >= actual_start:
+                rented_contribution_count += 1
+                occupied_days = (actual_end - actual_start).days + 1
+                # Formula: (Monthly Rent / Days in Month) * Occupied Days
+                rent_sum += (base_rent / days_in_month) * Decimal(str(occupied_days))
+                sc_sum += (base_sc / days_in_month) * Decimal(str(occupied_days))
+
+        # Categories for other tiles (Static counts)
+        care = qs.filter(purpose__iexact="care").count()
+        sale = qs.filter(purpose__iexact="sale").count()
+        total = qs.count()
 
         today = date.today()
         in_30 = today + timedelta(days=30)
 
-        # Inspections scheduled in the next 30 days
-        inspections_30d = 0
-        inspection_field = None
+        # Lookaheads
+        inspections = 0
         if hasattr(PropertyModel, "next_inspection_date"):
-            inspection_field = "next_inspection_date"
-        elif hasattr(PropertyModel, "inspection_date"):
-            inspection_field = "inspection_date"
-        if inspection_field:
-            inspections_30d = qs.filter(
-                **{
-                    f"{inspection_field}__gte": today,
-                    f"{inspection_field}__lte": in_30,
-                }
-            ).count()
+            inspections = qs.filter(next_inspection_date__gte=today, next_inspection_date__lte=in_30).count()
+        
+        to_vacate = 0
+        if hasattr(PropertyModel, "lease_end_date"):
+            to_vacate = qs.filter(lease_end_date__gte=today, lease_end_date__lte=in_30).count()
 
-        # Leases expiring in the next 30 days
-        lease_end_field = (
-            "lease_end_date"
-            if hasattr(PropertyModel, "lease_end_date")
-            else ("lease_expiry" if hasattr(PropertyModel, "lease_expiry") else None)
+        # Rent Received Calculation
+        rent_received_filters = Q(
+            is_active_classification=True,
+            transaction_type__name__iexact='Rent Payment', # Corrected to iexact
+            value_date__range=(m_start, m_end),
+            bank_transaction__source='BANK',
+            bank_transaction__is_deleted=False,
+            bank_transaction__credit_amount__gt=0
         )
-        to_be_vacated_30d = 0
-        if lease_end_field:
-            to_be_vacated_30d = qs.filter(
-                **{f"{lease_end_field}__lte": in_30, f"{lease_end_field}__gte": today}
-            ).count()
+        
+        # TC-09: Filter by company access
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            rent_received_filters &= Q(transaction_type__company__in=companies_rel.all())
+
+        from cash_ledger.models import CashLedgerRegister
+
+        # Owner Recoverables (Maintenance/Expenses)
+        # 1. BANK Recoverables
+        bank_recoverables_qs = Classification.objects.filter(
+            is_active_classification=True,
+            cost_centre__name__iregex=r'^(Rental|Sale)$',
+            value_date__range=(m_start, m_end),
+            bank_transaction__is_deleted=False
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            bank_recoverables_qs = bank_recoverables_qs.filter(transaction_type__company__in=companies_rel.all())
+
+        # We must iterate or use annotation because margin is in remarks text
+        bank_recoverables_sum = Decimal('0')
+        for item in bank_recoverables_qs:
+            bank_recoverables_sum += item.effective_amount
+
+        # 2. CASH Recoverables
+        cash_recoverables_filters = Q(
+            is_active=True,
+            cost_centre__name__iregex=r'^(Rental|Sale)$',
+            date__range=(m_start, m_end)
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            cash_recoverables_filters &= Q(company__in=companies_rel.all())
+
+        # In CashLedger, both amount and margin are explicit fields
+        cash_agg = CashLedgerRegister.objects.filter(cash_recoverables_filters).aggregate(
+            base=Sum('amount'),
+            mgn=Sum('margin')
+        )
+        cash_recoverables_sum = (cash_agg['base'] or Decimal('0')) + (cash_agg['mgn'] or Decimal('0'))
+
+        owner_recoverables_sum = bank_recoverables_sum + cash_recoverables_sum
+
+        # Total Margin Collected
+        # 1. BANK Margin
+        bank_margin_qs = Classification.objects.filter(
+            is_active_classification=True,
+            value_date__range=(m_start, m_end),
+            bank_transaction__is_deleted=False
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            bank_margin_qs = bank_margin_qs.filter(transaction_type__company__in=companies_rel.all())
+
+        bank_margin_sum = Decimal('0')
+        for item in bank_margin_qs:
+            mgn = item.parsed_margin
+            if mgn and mgn > 0: # Requirement #4: Include rows where margin_amount > 0
+                bank_margin_sum += mgn
+
+        # 2. CASH Margin
+        cash_margin_filters = Q(
+            is_active=True,
+            date__range=(m_start, m_end),
+            margin__gt=0 # Requirement #4: margin_amount > 0
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            cash_margin_filters &= Q(company__in=companies_rel.all())
+
+        cash_margin_sum = CashLedgerRegister.objects.filter(cash_margin_filters).aggregate(
+            total=Sum('margin')
+        )['total'] or Decimal('0')
+
+        total_margin_collected_sum = bank_margin_sum + cash_margin_sum
+
+        rent_received_sum = Classification.objects.filter(rent_received_filters).aggregate(
+            total=Sum('amount')
+        )['total'] or Decimal('0')
+
+        # iGen Service Charge Collected
+        sc_collected_filters = Q(
+            is_active_classification=True,
+            transaction_type__name__iexact='iGen Service Charge',
+            value_date__range=(m_start, m_end),
+            bank_transaction__source='BANK',
+            bank_transaction__is_deleted=False,
+            bank_transaction__credit_amount__gt=0
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            sc_collected_filters &= Q(transaction_type__company__in=companies_rel.all())
+
+        sc_collected_sum = Classification.objects.filter(sc_collected_filters).aggregate(
+            total=Sum('amount')
+        )['total'] or Decimal('0')
 
         payload = {
-            "total_properties": qs.count(),
-            "rented": rented,
-            "vacant": vacant,
+            "total_properties": total,
+            "rented": rented_contribution_count,
+            "vacant": total - rented_contribution_count,
             "care": care,
             "sale": sale,
-            "expected_rent_this_month": str(exp_rent),
-            "igen_sc_this_month": str(igen_sc),
-            "inspections_30d": inspections_30d,
-            "to_be_vacated_30d": to_be_vacated_30d,
+            "rent_to_be_collected": rent_sum.quantize(Decimal("1")), # Theoretical
+            "rent_received": rent_received_sum.quantize(Decimal("1")),
+            "rent_pending_collection": (rent_sum - rent_received_sum).quantize(Decimal("1")), 
+            "igen_sc_this_month": sc_sum.quantize(Decimal("1")),
+            "igen_sc_collected": sc_collected_sum.quantize(Decimal("1")),
+            "igen_sc_variance": (sc_collected_sum - sc_sum).quantize(Decimal("1")),
+            "owner_recoverables_total": owner_recoverables_sum.quantize(Decimal("1")),
+            "total_margin_collected": total_margin_collected_sum.quantize(Decimal("1")),
+            "inspections_30d": inspections,
+            "to_be_vacated_30d": to_vacate,
         }
         return Response(OwnerRentalSummarySerializer(payload).data)
 
@@ -1077,7 +1164,6 @@ class OwnerRentalPropertiesView(APIView):
             return Response([])
 
         qs = PropertyModel.objects.all()
-        # scope by company if needed
         user = request.user
         companies_rel = getattr(user, "companies", None)
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
@@ -1086,56 +1172,146 @@ class OwnerRentalPropertiesView(APIView):
             except Exception:
                 pass
 
+        month_str = request.GET.get("month") or date.today().strftime("%Y-%m")
+        m_start, m_end = _month_range(month_str)
+        days_in_month = Decimal(str((m_end - m_start).days + 1))
+
         rows = []
         for p in qs:
-            # Prefer monthly_rent -> expected_rent
-            rent_val = getattr(p, "monthly_rent", None)
-            if rent_val is None:
-                rent_val = getattr(p, "expected_rent", 0)
+            base_rent = getattr(p, "monthly_rent", Decimal("0")) or Decimal("0")
+            base_sc = getattr(p, "igen_service_charge", Decimal("0")) or Decimal("0")
+            l_start = getattr(p, "lease_start_date", None)
+            l_end = getattr(p, "lease_end_date", None)
 
-            # Tenant / owner display
-            tenant_name = None
+            status_str = (getattr(p, "status", "") or "").strip().lower()
+            
+            display_rent = Decimal("0")
+            display_sc = Decimal("0")
+            
+            if status_str == "occupied":
+                actual_start = max(l_start, m_start) if l_start else m_start
+                actual_end = min(l_end or m_end, m_end)
+                if actual_end >= actual_start:
+                    occ_days = (actual_end - actual_start).days + 1
+                    display_rent = (base_rent / days_in_month) * Decimal(str(occ_days))
+                    display_sc = (base_sc / days_in_month) * Decimal(str(occ_days))
+
             tenant_contact = getattr(p, "tenant_contact", None)
-            if tenant_contact is not None:
-                tenant_name = getattr(tenant_contact, "full_name", None) or getattr(
-                    tenant_contact, "name", None
-                )
-            if not tenant_name:
-                # legacy text field fallback
-                tenant_name = getattr(p, "tenant", None)
+            tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", None)
+            owner_name = getattr(getattr(p, "landlord", None), "full_name", None)
+            
+            # Safe flag retrieval
+            flags_obj = getattr(p, "owner_flags", None)
+            is_txn_scheduled = getattr(flags_obj, "transaction_scheduled", False) if flags_obj else False
+            is_email_sent = getattr(flags_obj, "email_sent", False) if flags_obj else False
 
-            owner_name = getattr(getattr(p, "landlord", None), "full_name", None) or getattr(
-                getattr(p, "landlord", None), "name", None
-            )
-
-            rows.append(
-                {
-                    "id": p.id,
-                    "property_name": getattr(p, "name", f"Property {p.id}"),
-                    "status": getattr(p, "status", "Vacant"),
-                    "rent": rent_val or 0,
-                    "igen_service_charge": getattr(p, "igen_service_charge", 0) or 0,
-                    "lease_start": getattr(p, "lease_start_date", None)
-                    or getattr(p, "lease_start", None),
-                    "lease_expiry": getattr(p, "lease_end_date", None)
-                    or getattr(p, "lease_expiry", None),
-                    "agreement_renewal_date": getattr(p, "agreement_renewal_date", None)
-                    if hasattr(p, "agreement_renewal_date")
-                    else None,
-                    "inspection_date": getattr(p, "next_inspection_date", None)
-                    or getattr(p, "inspection_date", None),
-                    "tenant_or_owner": tenant_name or owner_name,
-                    "transaction_scheduled": getattr(
-                        getattr(p, "owner_flags", None), "transaction_scheduled", False
-                    ),
-                    "email_sent": getattr(
-                        getattr(p, "owner_flags", None), "email_sent", False
-                    ),
-                    # still expose entity_id if we can derive it
-                    "entity_id": _extract_entity_id_from_property(p),
-                }
-            )
+            rows.append({
+                "id": p.id,
+                "property_name": p.name,
+                "status": p.status,
+                "base_rent": base_rent.quantize(Decimal("1")), # Full master rent
+                "base_igen_service_charge": base_sc.quantize(Decimal("1")),
+                "rent": display_rent.quantize(Decimal("1")), # Pro-rated display rent
+                "igen_service_charge": display_sc.quantize(Decimal("1")), 
+                "lease_start": l_start,
+                "lease_expiry": l_end,
+                "agreement_renewal_date": l_end,
+                "inspection_date": getattr(p, "next_inspection_date", None),
+                "tenant_or_owner": tenant_name or owner_name,
+                "transaction_scheduled": is_txn_scheduled,
+                "email_sent": is_email_sent,
+                "entity_id": _extract_entity_id_from_property(p),
+            })
         return Response(OwnerRentalRowSerializer(rows, many=True).data)
+
+
+class OwnerRentalPendingPropertiesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        PropertyModel = _get_property_model()
+        if PropertyModel is None:
+            return Response({"rows": [], "unmapped_received": "0"})
+
+        # Filters
+        user = request.user
+        month_str = request.GET.get("month") or date.today().strftime("%Y-%m")
+        m_start, m_end = _month_range(month_str)
+        days_in_month = Decimal(str((m_end - m_start).days + 1))
+        
+        qs = PropertyModel.objects.all()
+        companies_rel = getattr(user, "companies", None)
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+             qs = qs.filter(company__in=companies_rel.all())
+
+        # 1. Total Rent Received from all BANK entries (for reconciliation)
+        rent_received_filters = Q(
+            is_active_classification=True,
+            transaction_type__name__iexact='Rent Payment',
+            value_date__range=(m_start, m_end),
+            bank_transaction__source='BANK',
+            bank_transaction__is_deleted=False,
+            bank_transaction__credit_amount__gt=0
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            rent_received_filters &= Q(transaction_type__company__in=companies_rel.all())
+        
+        # 2. Map receipts to properties
+        # This gives us property_id -> total received
+        receipts = Classification.objects.filter(rent_received_filters).values(
+            'entity__linked_property_id'
+        ).annotate(total=Sum('amount'))
+        
+        received_map = {
+            r['entity__linked_property_id']: r['total'] 
+            for r in receipts if r['entity__linked_property_id']
+        }
+        
+        mapped_total = sum(received_map.values()) if received_map else Decimal("0")
+        total_received = Classification.objects.filter(rent_received_filters).aggregate(Sum('amount'))['amount__sum'] or Decimal("0")
+        unmapped_total = total_received - mapped_total
+
+        # 3. Process Properties
+        pending_list = []
+        # Filter for Occupied only (TC-05)
+        for p in qs.filter(status__iexact='Occupied'):
+            base_rent = getattr(p, "monthly_rent", Decimal("0")) or Decimal("0")
+            l_start = getattr(p, "lease_start_date", None)
+            l_end = getattr(p, "lease_end_date", None)
+            
+            # Simple pro-rating
+            expected_prop = Decimal("0")
+            actual_start = max(l_start, m_start) if l_start else m_start
+            actual_end = min(l_end or m_end, m_end)
+            if actual_end >= actual_start:
+                occ_days = (actual_end - actual_start).days + 1
+                expected_prop = (base_rent / days_in_month) * Decimal(str(occ_days))
+            
+            received_prop = received_map.get(p.id, Decimal("0"))
+            pending_prop = expected_prop - received_prop
+            
+            # TC-01, 02, 03, 04: Include only if pending > 0
+            if pending_prop.quantize(Decimal("1")) > 0:
+                tenant_contact = getattr(p, "tenant_contact", None)
+                tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", "N/A")
+                
+                pending_list.append({
+                    "property_id": p.id,
+                    "property_name": p.name,
+                    "tenant_name": tenant_name,
+                    "monthly_rent": base_rent.quantize(Decimal("1")),
+                    "expected_rent": expected_prop.quantize(Decimal("1")),
+                    "received_rent": received_prop.quantize(Decimal("1")),
+                    "pending_amount": pending_prop.quantize(Decimal("1")),
+                })
+
+        # Sort: Pending (desc), then Name
+        pending_list.sort(key=lambda x: (-x['pending_amount'], x['property_name']))
+
+        return Response({
+            "rows": OwnerRentalPendingPropertySerializer(pending_list, many=True).data,
+            "unmapped_received": unmapped_total.quantize(Decimal("1"))
+        })
 
 
 class OwnerRentalPropertyPatchView(APIView):

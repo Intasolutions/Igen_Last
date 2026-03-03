@@ -54,8 +54,14 @@ class OwnerRentalSummarySerializer(serializers.Serializer):
     vacant = serializers.IntegerField()
     care = serializers.IntegerField()
     sale = serializers.IntegerField()
-    expected_rent_this_month = serializers.DecimalField(max_digits=18, decimal_places=2)
-    igen_sc_this_month = serializers.DecimalField(max_digits=18, decimal_places=2)
+    rent_to_be_collected = serializers.DecimalField(max_digits=18, decimal_places=2)
+    rent_received = serializers.DecimalField(max_digits=18, decimal_places=2)
+    rent_pending_collection = serializers.DecimalField(max_digits=18, decimal_places=2)
+    igen_sc_this_month = serializers.DecimalField(max_digits=18, decimal_places=2) # This is Expected
+    igen_sc_collected = serializers.DecimalField(max_digits=18, decimal_places=2)
+    igen_sc_variance = serializers.DecimalField(max_digits=18, decimal_places=2)
+    owner_recoverables_total = serializers.DecimalField(max_digits=18, decimal_places=2)
+    total_margin_collected = serializers.DecimalField(max_digits=18, decimal_places=2)
     inspections_30d = serializers.IntegerField()
     to_be_vacated_30d = serializers.IntegerField()
 
@@ -65,13 +71,13 @@ class OwnerRentalRowSerializer(serializers.Serializer):
     property_name = serializers.CharField()
     status = serializers.CharField()  # Occupied / Vacant / Care / Sale
 
-    # Editable money fields
-    rent = serializers.DecimalField(
-        max_digits=16, decimal_places=2, allow_null=True, required=False
-    )
-    igen_service_charge = serializers.DecimalField(
-        max_digits=16, decimal_places=2, allow_null=True, required=False
-    )
+    # Editable master values
+    base_rent = serializers.DecimalField(max_digits=16, decimal_places=2, required=False)
+    base_igen_service_charge = serializers.DecimalField(max_digits=16, decimal_places=2, required=False)
+
+    # Pro-rated display values
+    rent = serializers.DecimalField(max_digits=16, decimal_places=2, required=False)
+    igen_service_charge = serializers.DecimalField(max_digits=16, decimal_places=2, required=False)
 
     # Editable date fields
     lease_start = serializers.DateField(allow_null=True, required=False)
@@ -115,3 +121,13 @@ class PivotTotalsSerializer(serializers.Serializer):
 class PivotResponseSerializer(serializers.Serializer):
     rows = serializers.ListField(child=serializers.DictField(), required=True)
     totals = PivotTotalsSerializer(allow_null=True, required=False)
+
+
+class OwnerRentalPendingPropertySerializer(serializers.Serializer):
+    property_id = serializers.IntegerField()
+    property_name = serializers.CharField()
+    tenant_name = serializers.CharField()
+    monthly_rent = serializers.DecimalField(max_digits=18, decimal_places=2)
+    expected_rent = serializers.DecimalField(max_digits=18, decimal_places=2)
+    received_rent = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pending_amount = serializers.DecimalField(max_digits=18, decimal_places=2)

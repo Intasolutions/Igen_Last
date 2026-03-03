@@ -22,6 +22,10 @@ function OwnerRentalTab() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  const [showPending, setShowPending] = useState(false);
+  const [pendingData, setPendingData] = useState({ rows: [], unmapped_received: 0 });
+  const [pendingLoading, setPendingLoading] = useState(false);
+
   const [editing, setEditing] = useState({});
   const [drafts, setDrafts] = useState({});
 
@@ -32,7 +36,8 @@ function OwnerRentalTab() {
   // search
   const [search, setSearch] = useState("");
 
-  // new: statement date range (from / to)
+  // filters
+  const [selectedMonth, setSelectedMonth] = useState(genCurrentMonth());
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
@@ -54,12 +59,13 @@ function OwnerRentalTab() {
     [filteredRows, page]
   );
 
-  const load = async () => {
+  const load = async (monthOverride) => {
+    const month = monthOverride || selectedMonth;
     setLoading(true);
     try {
       const [s, r] = await Promise.all([
-        API.get("analytics/owner-rental/summary/"),
-        API.get("analytics/owner-rental/properties/"),
+        API.get("analytics/owner-rental/summary/", { params: { month } }),
+        API.get("analytics/owner-rental/properties/", { params: { month } }),
       ]);
       setSummary(s.data);
       setRows(r.data || []);
@@ -71,18 +77,40 @@ function OwnerRentalTab() {
     }
   };
 
+  const loadPending = async () => {
+    setPendingLoading(true);
+    try {
+      const res = await API.get("analytics/owner-rental/pending-list/", {
+        params: { month: selectedMonth },
+      });
+      setPendingData(res.data);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to load pending list.");
+    } finally {
+      setPendingLoading(false);
+    }
+  };
+
   useEffect(() => {
-    load();
+    load(selectedMonth);
+    if (showPending) {
+      loadPending();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedMonth]);
+
+  useEffect(() => {
+    if (showPending) loadPending();
+  }, [showPending]);
 
   const startEdit = (r) => {
     setEditing((s) => ({ ...s, [r.id]: true }));
     setDrafts((d) => ({
       ...d,
       [r.id]: {
-        rent: r.rent ?? "",
-        igen_service_charge: r.igen_service_charge ?? "",
+        rent: r.base_rent ?? r.rent ?? "", // ✅ Always edit the FULL rent
+        igen_service_charge: r.base_igen_service_charge ?? r.igen_service_charge ?? "",
         lease_start: r.lease_start ?? "",
         lease_expiry: r.lease_expiry ?? "",
         agreement_renewal_date: r.agreement_renewal_date ?? r.lease_expiry ?? "",
@@ -118,7 +146,6 @@ function OwnerRentalTab() {
         igen_service_charge: data.igen_service_charge,
         lease_start: data.lease_start || null,
         lease_expiry: data.lease_expiry || null,
-        // agreement_renewal_date is read-only in UI now, so we don't send it
       });
       await load();
       cancelEdit(id);
@@ -189,8 +216,19 @@ function OwnerRentalTab() {
         title="Owner Dashboard – Rental"
         subtitle="Portfolio health at a glance"
         right={
-          <div className="hidden sm:block">
-            <Button variant="outline" onClick={load} disabled={loading}>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label className="hidden sm:block text-xs font-medium text-gray-500">
+                Month
+              </label>
+              <input
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm text-gray-900 outline-none"
+              />
+            </div>
+            <Button variant="outline" onClick={() => load()} disabled={loading}>
               Refresh
             </Button>
           </div>
@@ -204,14 +242,49 @@ function OwnerRentalTab() {
             <Metric title="Care" value={summary.care} tone="amber" />
             <Metric title="Sale" value={summary.sale} tone="amber" />
             <Metric
-              title="Expected Rent (This Month)"
-              value={`₹ ${inr(summary.expected_rent_this_month)}`}
+              title="Rent to be Collected"
+              value={`₹ ${inr(summary.rent_to_be_collected)}`}
               tone="blue"
+              tooltip="Theoretical amount calculated using pro-rated occupancy for the selected month."
             />
             <Metric
-              title="iGen Service Charge (This Month)"
-              value={`₹ ${inr(summary.igen_sc_this_month)}`}
+              title="Rent Received"
+              value={`₹ ${inr(summary.rent_received)}`}
+              tone="emerald"
+              tooltip="Actual rent collected in the bank based on Value Date for this month."
+            />
+            <Metric
+              title="Rent Pending Collection"
+              value={`₹ ${inr(summary.rent_pending_collection)}`}
+              tone="yellow"
+              tooltip="Detailed list of pending properties. (Expected Rent - Received Rent)"
+              onClick={() => setShowPending(!showPending)}
+              className="cursor-pointer border-2 border-yellow-200 hover:bg-yellow-50 transition-colors"
+            />
+            <Metric
+              title="iGen SC (Collected)"
+              value={
+                <div className="flex items-center gap-2">
+                  <span>₹ {inr(summary.igen_sc_collected)}</span>
+                  {summary.igen_sc_variance !== "0.00" && summary.igen_sc_variance !== 0 && (
+                    <span className="text-rose-500 font-bold text-lg" title={`Variance: ₹ ${inr(summary.igen_sc_variance)} (Diff between Collected vs Expected)`}>⚠️</span>
+                  )}
+                </div>
+              }
               tone="blue"
+              tooltip={`Expected: ₹ ${inr(summary.igen_sc_this_month)} | Variance: ₹ ${inr(summary.igen_sc_variance)}. Collected is based on Value Date for 'iGen Service Charge' transactions.`}
+            />
+            <Metric
+              title="Maintenance / Expenses (to be Collected)"
+              value={`₹ ${inr(summary.owner_recoverables_total)}`}
+              tone="blue"
+              tooltip="Total Maintenance and Expenses to be collected from owners for Rental/Sale cost centres."
+            />
+            <Metric
+              title="Total Margin Collected"
+              value={`₹ ${inr(summary.total_margin_collected)}`}
+              tone="emerald"
+              tooltip="Total profit collected for iGen during this period. Includes margins from all activities (Bank and Cash)."
             />
             <Metric
               title="Inspections scheduled (30 days)"
@@ -228,6 +301,57 @@ function OwnerRentalTab() {
           <div className="text-gray-500">Loading…</div>
         )}
       </Card>
+
+      {showPending && (
+        <Card
+          title="Rent Pending Apartments / Properties"
+          subtitle={`Detailed list of occupied properties with outstanding rent for ${selectedMonth}`}
+          className="border-yellow-100 shadow-amber-50"
+          right={
+            <Button variant="outline" size="sm" onClick={() => setShowPending(false)}>
+              Close List
+            </Button>
+          }
+        >
+          <div className="mb-4">
+            {pendingData.unmapped_received > 0 && (
+              <div className="bg-amber-50 border-l-4 border-amber-400 p-3 mb-3 text-sm text-amber-800 rounded">
+                <strong>⚠️ Note:</strong> The total KPI includes <b>₹ {inr(pendingData.unmapped_received)}</b> in rent receipts that are not currently linked to any specific property ID. Please link them in 'Review & Classify' to reconcile the list.
+              </div>
+            )}
+          </div>
+
+          <Table
+            headers={[
+              "Prop ID",
+              "Property/Flat",
+              "Tenant",
+              "Monthly Rent",
+              "Expected (Pro-rated)",
+              "Received (Prop)",
+              "Pending Amount",
+            ]}
+          >
+            {pendingLoading ? (
+              <tr><td colSpan={7} className="px-3 py-8 text-gray-500">Loading details...</td></tr>
+            ) : pendingData.rows.length === 0 ? (
+              <tr><td colSpan={7} className="px-3 py-8 text-gray-500 text-center">No properties found with pending rent for this month.</td></tr>
+            ) : (
+              pendingData.rows.map((p) => (
+                <tr key={p.property_id} className="hover:bg-gray-50 border-b border-gray-100">
+                  <td className="px-3 py-2 text-xs font-mono text-gray-400">{p.property_id}</td>
+                  <td className="px-3 py-2 font-medium">{p.property_name}</td>
+                  <td className="px-3 py-2 text-sm">{p.tenant_name}</td>
+                  <td className="px-3 py-2">₹ {inr(p.monthly_rent)}</td>
+                  <td className="px-3 py-2">₹ {inr(p.expected_rent)}</td>
+                  <td className="px-3 py-2 text-emerald-600">₹ {inr(p.received_rent)}</td>
+                  <td className="px-3 py-2 font-bold text-rose-600">₹ {inr(p.pending_amount)}</td>
+                </tr>
+              ))
+            )}
+          </Table>
+        </Card>
+      )}
 
       <Card
         title="Property List (Detailed)"

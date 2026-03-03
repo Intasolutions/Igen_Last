@@ -2,6 +2,8 @@
 
 import django.db.models.functions.text
 from django.db import migrations, models
+import os
+USE_SQLITE = os.environ.get("USE_SQLITE", "False").lower() in ("true", "1", "yes")
 
 
 class Migration(migrations.Migration):
@@ -49,8 +51,12 @@ class Migration(migrations.Migration):
             model_name='user',
             index=models.Index(fields=['created_at'], name='idx_user_created_at'),
         ),
-        migrations.AddConstraint(
-            model_name='user',
-            constraint=models.UniqueConstraint(django.db.models.functions.text.Lower('email'), condition=models.Q(('email__isnull', False)), name='uniq_user_email_lower'),
-        ),
     ]
+
+    if not USE_SQLITE:
+        operations.append(
+            migrations.AddConstraint(
+                model_name='user',
+                constraint=models.UniqueConstraint(django.db.models.functions.text.Lower('email'), condition=models.Q(('email__isnull', False)), name='uniq_user_email_lower'),
+            )
+        )

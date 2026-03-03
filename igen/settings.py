@@ -6,12 +6,7 @@ from datetime import timedelta
 # ------------------------------------------------------------
 # Load environment variables early (systemd points to /etc/igen.env)
 # ------------------------------------------------------------
-try:
-    from dotenv import load_dotenv
-    load_dotenv("/etc/igen.env")
-except Exception:
-    # If python-dotenv isn't available or file missing, just continue.
-    pass
+# Move to after BASE_DIR is defined
 
 # ------------------------------------------------------------
 # Core
@@ -30,6 +25,18 @@ def env_list(name: str, default_list):
         return default_list
     # comma-separated values, trimmed
     return [x.strip() for x in v.split(",") if x.strip()]
+
+# ------------------------------------------------------------
+# Load environment variables (after BASE_DIR is defined)
+# ------------------------------------------------------------
+try:
+    from dotenv import load_dotenv
+    # First priority: check for local .env in the project root
+    load_dotenv(BASE_DIR / ".env")
+    # Second priority: check for production env path
+    load_dotenv("/etc/igen.env")
+except Exception:
+    pass
 
 # SECRET KEY
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or "!!-dev-only-insecure-key-change-in-prod-!!"
@@ -133,16 +140,24 @@ WSGI_APPLICATION = "igen.wsgi.application"
 # Database
 #   (reads env, falls back to your current server values)
 # ------------------------------------------------------------
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB", "igen_db"),
-        "USER": os.environ.get("POSTGRES_USER", "igen_user"),
-        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "Igen@1234"),
-        "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
-        "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+if env_bool("USE_SQLITE", default=False):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "igen_db"),
+            "USER": os.environ.get("POSTGRES_USER", "igen_user"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "Igen@1234"),
+            "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        }
+    }
 
 # ------------------------------------------------------------
 # Password validation

@@ -1,4 +1,6 @@
 from django.db import migrations
+import os
+USE_SQLITE = os.environ.get("USE_SQLITE", "False").lower() in ("true", "1", "yes")
 
 VIEW_NAME = "v_transaction_ledger_combined"
 
@@ -60,6 +62,8 @@ class Migration(migrations.Migration):
         ("reports", "0004_auto_20250730_1941"),
     ]
     operations = [
-        migrations.RunSQL(sql=DROP_VIEW_SQL, reverse_sql=DROP_VIEW_SQL),
-        migrations.RunSQL(sql=CREATE_VIEW_SQL, reverse_sql=DROP_VIEW_SQL),
     ]
+
+    if not USE_SQLITE:
+        operations.append(migrations.RunSQL(sql=DROP_VIEW_SQL, reverse_sql=DROP_VIEW_SQL))
+        operations.append(migrations.RunSQL(sql=CREATE_VIEW_SQL, reverse_sql=DROP_VIEW_SQL))
