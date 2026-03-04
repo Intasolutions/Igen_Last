@@ -31,6 +31,7 @@ from .serializers import (
     OwnerRentalSummarySerializer,
     OwnerRentalRowSerializer,
     ProjectProfitRowSerializer,
+    OwnerRentalPendingPropertySerializer,
 )
 from .services.exports import export_excel, export_simple_pdf
 from .services.ledger import unified_ledger, running_balance, opening_balance_until

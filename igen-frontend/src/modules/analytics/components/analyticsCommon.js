@@ -186,8 +186,8 @@ export const Tab = ({ active, onClick, children }) => (
   <button
     onClick={onClick}
     className={`rounded-xl px-3 py-2 text-sm font-medium transition ${active
-        ? "bg-gray-900 text-white"
-        : "bg-white text-gray-900 border border-gray-200 hover:bg-gray-50"
+      ? "bg-gray-900 text-white"
+      : "bg-white text-gray-900 border border-gray-200 hover:bg-gray-50"
       }`}
   >
     {children}
@@ -216,10 +216,14 @@ export const Table = ({ headers, children, foot }) => (
   </div>
 );
 
-export const Metric = ({ title, value, tone = "blue", tooltip }) => {
+export const Metric = ({ title, value, tone = "blue", tooltip, onClick, className = "" }) => {
   const t = toneClass[tone] || toneClass.blue;
   return (
-    <div className={`rounded-xl border border-gray-200 p-4 ${t.bg}`} title={tooltip}>
+    <div
+      className={`rounded-xl border border-gray-200 p-4 ${t.bg} ${className}`}
+      title={tooltip}
+      onClick={onClick}
+    >
       <div className={`text-xs ${t.text}`}>{title}</div>
       <div className="mt-1 text-lg font-semibold text-gray-900">{value}</div>
     </div>
