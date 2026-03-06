@@ -108,11 +108,12 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
     if (!form.cost_centre_id) return;
     setForm(prev => {
       const patch = {};
-      if (prev.transaction_type_id && !filteredTtypes.some(t => t.transaction_type_id === prev.transaction_type_id)) {
+      // Use String comparison to handle mixed types (string/number) from API
+      if (prev.transaction_type_id && !filteredTtypes.some(t => String(t.transaction_type_id) === String(prev.transaction_type_id))) {
         patch.transaction_type_id = '';
         patch.margin = ''; // clear margin if tx-type reset
       }
-      if (prev.contract_id && !filteredContracts.some(c => c.id === prev.contract_id)) {
+      if (prev.contract_id && !filteredContracts.some(c => String(c.id) === String(prev.contract_id))) {
         patch.contract_id = '';
       }
       return Object.keys(patch).length ? { ...prev, ...patch } : prev;
