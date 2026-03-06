@@ -105,7 +105,10 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
 
   // If cost centre changes, clear selections that no longer belong to it
   useEffect(() => {
-    if (!form.cost_centre_id) return;
+    // CRITICAL: Do NOT clear the form while we are still loading the data lists, 
+    // otherwise the initial valid selection is wiped out before the matching list arrives.
+    if (!form.cost_centre_id || loadingDDL || ttypes.length === 0) return;
+
     setForm(prev => {
       const patch = {};
       // Use String comparison to handle mixed types (string/number) from API
@@ -118,7 +121,7 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
       }
       return Object.keys(patch).length ? { ...prev, ...patch } : prev;
     });
-  }, [form.cost_centre_id, filteredTtypes, filteredContracts]);
+  }, [form.cost_centre_id, filteredTtypes, filteredContracts, loadingDDL, ttypes.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -126,9 +129,9 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
     // seed form from incoming child object & parse margin from remarks
     const parsed = parseMarginFromRemarks(child?.remarks || '');
     setForm({
-      transaction_type_id: child?.transaction_type_id ?? '',
-      cost_centre_id: child?.cost_centre_id ?? '',
-      entity_id: child?.entity_id ?? '',
+      transaction_type_id: child?.transaction_type_id || child?.active_transaction_type_id || '',
+      cost_centre_id: child?.cost_centre_id || child?.active_cost_centre_id || '',
+      entity_id: child?.entity_id || child?.active_entity_id || '',
       asset_id: child?.asset_id ?? '',
       contract_id: child?.contract_id ?? '',
       value_date: toYMD(child?.value_date || ''),
