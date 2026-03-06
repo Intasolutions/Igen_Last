@@ -92,13 +92,15 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
   const filteredTtypes = useMemo(() => {
     const ccid = form.cost_centre_id;
     if (!ccid) return [];
-    return (ttypes || []).filter(t => String(t.cost_centre) === String(ccid));
+    // Fix: Match against the correct ID field from the transaction type object
+    return (ttypes || []).filter(t => String(t.cost_centre_id || t.cost_centre) === String(ccid));
   }, [ttypes, form.cost_centre_id]);
 
   const filteredContracts = useMemo(() => {
     const ccid = form.cost_centre_id;
     if (!ccid) return [];
-    return (contracts || []).filter(c => String(c.cost_centre) === String(ccid));
+    // Fix: Match against the correct ID field from the contract object
+    return (contracts || []).filter(c => String(c.cost_centre_id || c.cost_centre) === String(ccid));
   }, [contracts, form.cost_centre_id]);
 
   // If cost centre changes, clear selections that no longer belong to it
