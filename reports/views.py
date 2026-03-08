@@ -166,13 +166,12 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
                 except ValueError:
                     qs = qs.filter(company_id=-1)  # force empty if bad id
 
-        # Required filters (BRD)
+        # Required filters (BRD) - entity is now optional
         start_date, end_date, entity_param = self._required_params()
-        if not start_date or not end_date or not entity_param:
+        if not start_date or not end_date:
             self._missing = {
                 "start_date": bool(start_date),
                 "end_date": bool(end_date),
-                "entity": bool(entity_param),
             }
             return qs.none()
 
@@ -180,13 +179,15 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         if not sd or not ed:
             return qs.none()
 
-        # Resolve entity (id or code / or name)
-        entity_id = self._resolve_entity_id(entity_param)
-        if entity_id is None:
-            self._bad_entity = True
-            return qs.none()
+        qs = qs.filter(date__gte=sd, date__lte=ed)
 
-        qs = qs.filter(date__gte=sd, date__lte=ed, entity_id=entity_id)
+        # Optional entity filter
+        if entity_param:
+            entity_id = self._resolve_entity_id(entity_param)
+            if entity_id is None:
+                self._bad_entity = True
+                return qs.none()
+            qs = qs.filter(entity_id=entity_id)
 
         # Optional amount range
         min_amount = self._parse_decimal(self.request.query_params.get("min_amount"))
@@ -332,7 +333,13 @@ class TransactionLedgerViewSet(viewsets.ReadOnlyModelViewSet):
             max_len = max(len(str(c.value)) if c.value is not None else 0 for c in ws[letter])
             ws.column_dimensions[letter].width = min(max(12, max_len + 2), 60)
 
-        entity_name = getattr(qs.first().entity, "name", "entity")
+        entity_param = request.query_params.get("entity")
+        if not entity_param:
+            entity_name = "All_Entities"
+        else:
+            first = qs.first()
+            entity_name = getattr(first.entity, "name", "entity") if first and hasattr(first, "entity") else "entity"
+
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
         fname = f"entity_wise_{entity_name}_{start_date}_to_{end_date}.xlsx"

@@ -61,9 +61,22 @@ class OwnerRentalSummarySerializer(serializers.Serializer):
     igen_sc_collected = serializers.DecimalField(max_digits=18, decimal_places=2)
     igen_sc_variance = serializers.DecimalField(max_digits=18, decimal_places=2)
     owner_recoverables_total = serializers.DecimalField(max_digits=18, decimal_places=2)
+    owner_recoverables_base = serializers.DecimalField(max_digits=18, decimal_places=2, required=False)
+    owner_recoverables_margin = serializers.DecimalField(max_digits=18, decimal_places=2, required=False)
     total_margin_collected = serializers.DecimalField(max_digits=18, decimal_places=2)
+    total_igen_income = serializers.DecimalField(max_digits=18, decimal_places=2, required=False)
+    igen_income_type_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
+    igen_income_cc_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
     inspections_30d = serializers.IntegerField()
+    inspections_due_5d = serializers.IntegerField()
+    inspections_expired = serializers.IntegerField()
+    renewals_30d = serializers.IntegerField()
+    agreements_expired = serializers.IntegerField()
     to_be_vacated_30d = serializers.IntegerField()
+    margin_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
+    total_igen_expenses = serializers.DecimalField(max_digits=18, decimal_places=2, required=False)
+    igen_expense_type_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
+    igen_expense_cc_breakdown = serializers.ListField(child=serializers.DictField(), required=False)
 
 
 class OwnerRentalRowSerializer(serializers.Serializer):
@@ -131,3 +144,41 @@ class OwnerRentalPendingPropertySerializer(serializers.Serializer):
     expected_rent = serializers.DecimalField(max_digits=18, decimal_places=2)
     received_rent = serializers.DecimalField(max_digits=18, decimal_places=2)
     pending_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+class OwnerRentalInspectionExpiryPropertySerializer(serializers.Serializer):
+    property_id = serializers.IntegerField()
+    property_name = serializers.CharField()
+    inspection_date = serializers.DateField(allow_null=True)
+    days_left = serializers.IntegerField()
+    tenant_name = serializers.CharField()
+    owner_name = serializers.CharField()
+    project_manager = serializers.CharField()
+class OwnerRentalAgreementExpiryPropertySerializer(serializers.Serializer):
+    property_id = serializers.IntegerField()
+    property_name = serializers.CharField()
+    expiry_date = serializers.DateField(allow_null=True)
+    days_left = serializers.IntegerField()
+    tenant_name = serializers.CharField()
+    owner_name = serializers.CharField()
+
+class OwnerRentalServiceChargeBreakdownSerializer(serializers.Serializer):
+    property_id = serializers.IntegerField(allow_null=True)
+    property_name = serializers.CharField()
+    tenant_name = serializers.CharField()
+    expected_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
+    collected_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
+    variance = serializers.DecimalField(max_digits=18, decimal_places=2)
+    details = serializers.ListField(child=serializers.DictField(), required=False) # For transaction-level breakdown per property
+
+class OwnerRentalMaintenanceBreakdownSerializer(serializers.Serializer):
+    property_id = serializers.IntegerField(allow_null=True)
+    property_name = serializers.CharField()
+    cost_centre = serializers.CharField()
+    txn_type = serializers.CharField()
+    base_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
+    margin_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
+    total_collectible = serializers.DecimalField(max_digits=18, decimal_places=2)
+    date = serializers.DateField()
+    remarks = serializers.CharField(allow_null=True, required=False)
+    source = serializers.CharField() # BANK or CASH

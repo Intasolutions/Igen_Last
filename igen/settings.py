@@ -45,7 +45,7 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or "!!-dev-only-insecure-key-ch
 DEBUG = env_bool("DJANGO_DEBUG", default=False)
 
 # Hosts & CSRF
-DEFAULT_ALLOWED_HOSTS = ["igenproperties.org", "www.igenproperties.org", "localhost", "127.0.0.1"]
+DEFAULT_ALLOWED_HOSTS = ["igenproperties.org", "www.igenproperties.org", "localhost", "127.0.0.1","147.93.18.219","test.igenproperties.org"]
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS)
 
 DEFAULT_CSRF_TRUSTED = [
@@ -53,6 +53,8 @@ DEFAULT_CSRF_TRUSTED = [
     "https://www.igenproperties.org",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+"http://147.93.18.219:8080",
+"https://test.igenproperties.org/"
 ]
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS", DEFAULT_CSRF_TRUSTED)
 
@@ -151,7 +153,7 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", "igen_db"),
+            "NAME": os.environ.get("POSTGRES_DB", "igen_staging_db"),
             "USER": os.environ.get("POSTGRES_USER", "igen_user"),
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "Igen@1234"),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
@@ -224,7 +226,7 @@ CORS_ALLOW_CREDENTIALS = True
 if not CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = env_list(
         "CORS_ALLOWED_ORIGINS",
-        ["https://igenproperties.org", "https://www.igenproperties.org", "http://localhost:3000"],
+        ["https://igenproperties.org", "https://www.igenproperties.org", "http://localhost:3000","http://147.93.18.219:8080","https://test.igenproperties.org"],
     )
 
 # ------------------------------------------------------------

@@ -79,9 +79,8 @@ const Label = ({ children }) => (
 const Input = (props) => (
   <input
     {...props}
-    className={`h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 ${
-      props.className || ""
-    }`}
+    className={`h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-xs outline-none focus:ring-2 focus:ring-blue-200 ${props.className || ""
+      }`}
   />
 );
 
@@ -122,9 +121,8 @@ const Table = ({ headers, children, foot }) => (
           {headers.map((h, i) => (
             <th
               key={i}
-              className={`px-3 py-2 text-left font-semibold ${
-                i === headers.length - 1 ? "pr-4" : ""
-              }`}
+              className={`px-3 py-2 text-left font-semibold ${i === headers.length - 1 ? "pr-4" : ""
+                }`}
             >
               {h}
             </th>
@@ -259,10 +257,10 @@ export default function EntityWiseReport() {
       setErr("Start Date cannot be after End Date.");
       return false;
     }
-    if (!entity) {
-      setErr("Entity is required.");
-      return false;
-    }
+    // if (!entity) {
+    //   setErr("Entity is required.");
+    //   return false;
+    // }
     if (min_amount !== "" && max_amount !== "") {
       const min = Number(min_amount);
       const max = Number(max_amount);
@@ -380,10 +378,10 @@ export default function EntityWiseReport() {
             <Button variant="outline" onClick={reset}>
               Reset
             </Button>
-            <Button variant="outline" onClick={exportXlsx} disabled={!filters.entity}>
+            <Button variant="outline" onClick={exportXlsx}>
               Export
             </Button>
-            <Button onClick={fetchReport} disabled={!filters.entity}>
+            <Button onClick={fetchReport}>
               Search
             </Button>
           </div>
@@ -419,7 +417,7 @@ export default function EntityWiseReport() {
               options={entityOptions}
               value={filters.entity}
               onChange={(id) => setFilters((f) => ({ ...f, entity: id }))}
-              placeholder="Select entity…"
+              placeholder="All entities"
             />
           </div>
 
@@ -488,14 +486,12 @@ export default function EntityWiseReport() {
             <Button
               variant="outline"
               onClick={exportXlsx}
-              disabled={!filters.entity}
               className="flex-1"
             >
               Export
             </Button>
             <Button
               onClick={fetchReport}
-              disabled={!filters.entity}
               className="flex-1"
             >
               Apply
@@ -537,9 +533,8 @@ export default function EntityWiseReport() {
       {/* Table */}
       <Card
         title="Transactions"
-        subtitle={`Showing ${rows.length} ${
-          rows.length === 1 ? "record" : "records"
-        }`}
+        subtitle={`Showing ${rows.length} ${rows.length === 1 ? "record" : "records"
+          }`}
       >
         <Table
           headers={[

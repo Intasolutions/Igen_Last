@@ -1,5 +1,5 @@
 from properties.models import Property
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from decimal import Decimal
 from io import BytesIO  # for DOCX response
 from collections import defaultdict  # needed by FinancialDashboardPivotView
@@ -32,6 +32,10 @@ from .serializers import (
     OwnerRentalRowSerializer,
     ProjectProfitRowSerializer,
     OwnerRentalPendingPropertySerializer,
+    OwnerRentalInspectionExpiryPropertySerializer,
+    OwnerRentalAgreementExpiryPropertySerializer,
+    OwnerRentalServiceChargeBreakdownSerializer,
+    OwnerRentalMaintenanceBreakdownSerializer,
 )
 from .services.exports import export_excel, export_simple_pdf
 from .services.ledger import unified_ledger, running_balance, opening_balance_until
@@ -971,7 +975,7 @@ class OwnerRentalSummaryView(APIView):
                 ).data
             )
 
-        qs = PropertyModel.objects.all()
+        qs = PropertyModel.objects.filter(is_active=True)
         user = request.user
         companies_rel = getattr(user, "companies", None)
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
@@ -1025,20 +1029,32 @@ class OwnerRentalSummaryView(APIView):
 
         today = date.today()
         in_30 = today + timedelta(days=30)
+        in_5 = today + timedelta(days=5)
 
         # Lookaheads
         inspections = 0
         if hasattr(PropertyModel, "next_inspection_date"):
             inspections = qs.filter(next_inspection_date__gte=today, next_inspection_date__lte=in_30).count()
         
+        inspections_due = 0
+        inspections_expired = 0
+        if hasattr(PropertyModel, "next_inspection_date"):
+            inspections_due = qs.filter(next_inspection_date__gte=today, next_inspection_date__lte=in_5).count()
+            inspections_expired = qs.filter(next_inspection_date__lt=today).count()
+
         to_vacate = 0
+        renewals_30d = 0
+        agreements_expired = 0
         if hasattr(PropertyModel, "lease_end_date"):
             to_vacate = qs.filter(lease_end_date__gte=today, lease_end_date__lte=in_30).count()
+            # Only for Occupied properties as per 11th enhancement
+            renewals_30d = qs.filter(status__iexact="occupied", lease_end_date__gte=today, lease_end_date__lte=in_30).count()
+            agreements_expired = qs.filter(status__iexact="occupied", lease_end_date__lt=today).count()
 
         # Rent Received Calculation
         rent_received_filters = Q(
             is_active_classification=True,
-            transaction_type__name__iexact='Rent Payment', # Corrected to iexact
+            transaction_type__name__iexact='Rent In', # Requirement: Only take 'Rent In'
             value_date__range=(m_start, m_end),
             bank_transaction__source='BANK',
             bank_transaction__is_deleted=False,
@@ -1055,7 +1071,7 @@ class OwnerRentalSummaryView(APIView):
         # 1. BANK Recoverables
         bank_recoverables_qs = Classification.objects.filter(
             is_active_classification=True,
-            cost_centre__name__iregex=r'^(Rental|Sale)$',
+            transaction_type__name__iregex=r'(Maintenance|Legal|Paper Work|Paperwork)',
             value_date__range=(m_start, m_end),
             bank_transaction__is_deleted=False
         )
@@ -1063,14 +1079,18 @@ class OwnerRentalSummaryView(APIView):
             bank_recoverables_qs = bank_recoverables_qs.filter(transaction_type__company__in=companies_rel.all())
 
         # We must iterate or use annotation because margin is in remarks text
-        bank_recoverables_sum = Decimal('0')
+        bank_recoverables_base = Decimal('0')
+        bank_recoverables_margin = Decimal('0')
         for item in bank_recoverables_qs:
-            bank_recoverables_sum += item.effective_amount
+            bank_recoverables_base += (item.amount or Decimal('0'))
+            bank_recoverables_margin += (item.parsed_margin or Decimal('0'))
+        
+        bank_recoverables_sum = bank_recoverables_base + bank_recoverables_margin
 
         # 2. CASH Recoverables
         cash_recoverables_filters = Q(
             is_active=True,
-            cost_centre__name__iregex=r'^(Rental|Sale)$',
+            transaction_type__name__iregex=r'(Maintenance|Legal|Paper Work|Paperwork)',
             date__range=(m_start, m_end)
         )
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
@@ -1081,40 +1101,63 @@ class OwnerRentalSummaryView(APIView):
             base=Sum('amount'),
             mgn=Sum('margin')
         )
-        cash_recoverables_sum = (cash_agg['base'] or Decimal('0')) + (cash_agg['mgn'] or Decimal('0'))
+        cash_recoverables_base = (cash_agg['base'] or Decimal('0'))
+        cash_recoverables_margin = (cash_agg['mgn'] or Decimal('0'))
+        cash_recoverables_sum = cash_recoverables_base + cash_recoverables_margin
 
         owner_recoverables_sum = bank_recoverables_sum + cash_recoverables_sum
+        owner_recoverables_base = bank_recoverables_base + cash_recoverables_base
+        owner_recoverables_margin = bank_recoverables_margin + cash_recoverables_margin
 
-        # Total Margin Collected
+        # Total Margin Collected (Requirement 7 Update: Only Margin Applicable Types + Breakdown)
+        margin_breakdown = defaultdict(lambda: {"bank": Decimal('0'), "cash": Decimal('0'), "total": Decimal('0')})
+        
         # 1. BANK Margin
         bank_margin_qs = Classification.objects.filter(
             is_active_classification=True,
+            transaction_type__margin_applicable=True, # New Strict Requirement
             value_date__range=(m_start, m_end),
             bank_transaction__is_deleted=False
-        )
+        ).select_related('cost_centre')
+        
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
             bank_margin_qs = bank_margin_qs.filter(transaction_type__company__in=companies_rel.all())
 
         bank_margin_sum = Decimal('0')
         for item in bank_margin_qs:
             mgn = item.parsed_margin
-            if mgn and mgn > 0: # Requirement #4: Include rows where margin_amount > 0
+            if mgn and mgn > 0:
+                cc_name = item.cost_centre.name if item.cost_centre else "Other"
+                margin_breakdown[cc_name]["bank"] += mgn
+                margin_breakdown[cc_name]["total"] += mgn
                 bank_margin_sum += mgn
 
         # 2. CASH Margin
         cash_margin_filters = Q(
             is_active=True,
+            transaction_type__margin_applicable=True, # New Strict Requirement
             date__range=(m_start, m_end),
-            margin__gt=0 # Requirement #4: margin_amount > 0
+            margin__gt=0
         )
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
             cash_margin_filters &= Q(company__in=companies_rel.all())
 
-        cash_margin_sum = CashLedgerRegister.objects.filter(cash_margin_filters).aggregate(
-            total=Sum('margin')
-        )['total'] or Decimal('0')
+        cash_margin_qs = CashLedgerRegister.objects.filter(cash_margin_filters).select_related('cost_centre')
+        cash_margin_sum = Decimal('0')
+        
+        for item in cash_margin_qs:
+            mgn = item.margin or Decimal('0')
+            cc_name = item.cost_centre.name if item.cost_centre else "Other"
+            margin_breakdown[cc_name]["cash"] += mgn
+            margin_breakdown[cc_name]["total"] += mgn
+            cash_margin_sum += mgn
 
         total_margin_collected_sum = bank_margin_sum + cash_margin_sum
+        
+        # Format breakdown for JSON
+        formatted_margin_breakdown = [
+            {"cost_centre": cc, **vals} for cc, vals in margin_breakdown.items()
+        ]
 
         rent_received_sum = Classification.objects.filter(rent_received_filters).aggregate(
             total=Sum('amount')
@@ -1123,7 +1166,7 @@ class OwnerRentalSummaryView(APIView):
         # iGen Service Charge Collected
         sc_collected_filters = Q(
             is_active_classification=True,
-            transaction_type__name__iexact='iGen Service Charge',
+            transaction_type__name__icontains='Service Charge', # Flex search for customizable names
             value_date__range=(m_start, m_end),
             bank_transaction__source='BANK',
             bank_transaction__is_deleted=False,
@@ -1135,6 +1178,115 @@ class OwnerRentalSummaryView(APIView):
         sc_collected_sum = Classification.objects.filter(sc_collected_filters).aggregate(
             total=Sum('amount')
         )['total'] or Decimal('0')
+
+        # Total iGen Income (8th Enhancement)
+        income_types = ['iGen Service Charge', 'iGen Brokerage', 'Other Income']
+        igen_income_type_breakdown = {t: Decimal('0') for t in income_types}
+        igen_income_cc_breakdown = defaultdict(Decimal)
+        
+        # 1. BANK Income Credits
+        bank_income_qs = Classification.objects.filter(
+            is_active_classification=True,
+            transaction_type__name__in=income_types,
+            value_date__range=(m_start, m_end),
+            bank_transaction__is_deleted=False,
+            bank_transaction__credit_amount__gt=0
+        ).select_related('transaction_type', 'cost_centre')
+        
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            bank_income_qs = bank_income_qs.filter(transaction_type__company__in=companies_rel.all())
+
+        for item in bank_income_qs:
+            amount = item.amount or Decimal('0')
+            type_name = item.transaction_type.name
+            cc_name = item.cost_centre.name if item.cost_centre else "Other"
+            
+            igen_income_type_breakdown[type_name] += amount
+            igen_income_cc_breakdown[cc_name] += amount
+
+        # 2. CASH Income Credits
+        cash_income_filters = Q(
+            is_active=True,
+            transaction_type__name__in=income_types,
+            date__range=(m_start, m_end),
+            amount__gt=0
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            cash_income_filters &= Q(company__in=companies_rel.all())
+
+        cash_income_qs = CashLedgerRegister.objects.filter(cash_income_filters).select_related('transaction_type', 'cost_centre')
+        for item in cash_income_qs:
+            amount = item.amount or Decimal('0')
+            type_name = item.transaction_type.name
+            cc_name = item.cost_centre.name if item.cost_centre else "Other"
+            
+            igen_income_type_breakdown[type_name] += amount
+            igen_income_cc_breakdown[cc_name] += amount
+
+        # Total Calculation
+        total_income_credits = sum(igen_income_type_breakdown.values())
+        total_igen_income = total_income_credits + total_margin_collected_sum
+
+        # Formatting for response
+        formatted_income_type_breakdown = [
+            {"type": k, "amount": v} for k, v in igen_income_type_breakdown.items()
+        ]
+        formatted_income_cc_breakdown = [
+            {"cost_centre": k, "amount": v} for k, v in igen_income_cc_breakdown.items()
+        ]
+
+        # Total iGen Expenses (9th Enhancement)
+        # Filters: debit only, excluding Rental/Sale/Maintenance cost centres
+        expense_regex = r'(igen service charge|cleaning|stationery|transport|fuel|office rent)'
+        igen_expense_type_breakdown = defaultdict(Decimal)
+        igen_expense_cc_breakdown = defaultdict(Decimal)
+
+        # 1. BANK Expenses (Debits)
+        bank_expense_qs = Classification.objects.filter(
+            is_active_classification=True,
+            transaction_type__name__iregex=expense_regex,
+            value_date__range=(m_start, m_end),
+            bank_transaction__is_deleted=False,
+            bank_transaction__debit_amount__gt=0
+        ).exclude(
+            cost_centre__name__iregex=r'(Rental|Sale|Maintenance)'
+        ).select_related('transaction_type', 'cost_centre')
+
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            bank_expense_qs = bank_expense_qs.filter(transaction_type__company__in=companies_rel.all())
+
+        for item in bank_expense_qs:
+            # For expenses, we use the debit amount (treated as positive for KPI display)
+            amount = item.bank_transaction.debit_amount or Decimal('0')
+            type_name = item.transaction_type.name
+            cc_name = item.cost_centre.name if item.cost_centre else "Administrative"
+            
+            igen_expense_type_breakdown[type_name] += amount
+            igen_expense_cc_breakdown[cc_name] += amount
+
+        # 2. CASH Expenses (Payments)
+        cash_expense_filters = Q(
+            is_active=True,
+            transaction_type__name__iregex=expense_regex,
+            date__range=(m_start, m_end),
+            amount__lt=0 # Debits are negative in Cash ledger
+        )
+        if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            cash_expense_filters &= Q(company__in=companies_rel.all())
+
+        cash_expense_qs = CashLedgerRegister.objects.filter(cash_expense_filters).exclude(
+            cost_centre__name__iregex=r'(Rental|Sale|Maintenance)'
+        ).select_related('transaction_type', 'cost_centre')
+
+        for item in cash_expense_qs:
+            amount = abs(item.amount or Decimal('0'))
+            type_name = item.transaction_type.name
+            cc_name = item.cost_centre.name if item.cost_centre else "Administrative"
+            
+            igen_expense_type_breakdown[type_name] += amount
+            igen_expense_cc_breakdown[cc_name] += amount
+
+        total_igen_expenses = sum(igen_expense_type_breakdown.values())
 
         payload = {
             "total_properties": total,
@@ -1149,9 +1301,22 @@ class OwnerRentalSummaryView(APIView):
             "igen_sc_collected": sc_collected_sum.quantize(Decimal("1")),
             "igen_sc_variance": (sc_collected_sum - sc_sum).quantize(Decimal("1")),
             "owner_recoverables_total": owner_recoverables_sum.quantize(Decimal("1")),
+            "owner_recoverables_base": owner_recoverables_base.quantize(Decimal("1")),
+            "owner_recoverables_margin": owner_recoverables_margin.quantize(Decimal("1")),
             "total_margin_collected": total_margin_collected_sum.quantize(Decimal("1")),
+            "total_igen_income": total_igen_income.quantize(Decimal("1")),
+            "total_igen_expenses": total_igen_expenses.quantize(Decimal("1")),
+            "igen_income_type_breakdown": formatted_income_type_breakdown,
+            "igen_income_cc_breakdown": formatted_income_cc_breakdown,
+            "igen_expense_type_breakdown": [{"type": k, "amount": v} for k, v in igen_expense_type_breakdown.items()],
+            "igen_expense_cc_breakdown": [{"cost_centre": k, "amount": v} for k, v in igen_expense_cc_breakdown.items()],
             "inspections_30d": inspections,
+            "inspections_due_5d": inspections_due,
+            "inspections_expired": inspections_expired,
+            "renewals_30d": renewals_30d,
+            "agreements_expired": agreements_expired,
             "to_be_vacated_30d": to_vacate,
+            "margin_breakdown": formatted_margin_breakdown,
         }
         return Response(OwnerRentalSummarySerializer(payload).data)
 
@@ -1164,7 +1329,7 @@ class OwnerRentalPropertiesView(APIView):
         if PropertyModel is None:
             return Response([])
 
-        qs = PropertyModel.objects.all()
+        qs = PropertyModel.objects.filter(is_active=True)
         user = request.user
         companies_rel = getattr(user, "companies", None)
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
@@ -1240,7 +1405,7 @@ class OwnerRentalPendingPropertiesView(APIView):
         m_start, m_end = _month_range(month_str)
         days_in_month = Decimal(str((m_end - m_start).days + 1))
         
-        qs = PropertyModel.objects.all()
+        qs = PropertyModel.objects.filter(is_active=True)
         companies_rel = getattr(user, "companies", None)
         if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
              qs = qs.filter(company__in=companies_rel.all())
@@ -1248,7 +1413,7 @@ class OwnerRentalPendingPropertiesView(APIView):
         # 1. Total Rent Received from all BANK entries (for reconciliation)
         rent_received_filters = Q(
             is_active_classification=True,
-            transaction_type__name__iexact='Rent Payment',
+            transaction_type__name__iexact='Rent In', # Requirement: Only take 'Rent In'
             value_date__range=(m_start, m_end),
             bank_transaction__source='BANK',
             bank_transaction__is_deleted=False,
@@ -1291,8 +1456,8 @@ class OwnerRentalPendingPropertiesView(APIView):
             received_prop = received_map.get(p.id, Decimal("0"))
             pending_prop = expected_prop - received_prop
             
-            # TC-01, 02, 03, 04: Include only if pending > 0
-            if pending_prop.quantize(Decimal("1")) > 0:
+            # Include any property with a non-zero discrepancy (Debt or Advance)
+            if pending_prop.quantize(Decimal("1")) != 0:
                 tenant_contact = getattr(p, "tenant_contact", None)
                 tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", "N/A")
                 
@@ -1312,6 +1477,353 @@ class OwnerRentalPendingPropertiesView(APIView):
         return Response({
             "rows": OwnerRentalPendingPropertySerializer(pending_list, many=True).data,
             "unmapped_received": unmapped_total.quantize(Decimal("1"))
+        })
+
+
+class OwnerRentalInspectionExpiriesView(APIView):
+    """
+    Inspection Drill-down for Owner Dashboard:
+      - Due list: inspection_due_date within next 5 days
+      - Expiry list: inspection_expiry_date within next 5 days
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        PropertyModel = _get_property_model()
+        if PropertyModel is None:
+            return Response({"rows": []})
+
+        user = request.user
+        type_filter = request.GET.get("type", "upcoming")
+        company_id = request.GET.get("company_id")
+        today = date.today()
+        in_5 = today + timedelta(days=5)
+
+        qs = PropertyModel.objects.filter(is_active=True)
+        if company_id:
+            qs = qs.filter(company_id=company_id)
+        else:
+            companies_rel = getattr(user, "companies", None)
+            if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+                qs = qs.filter(company__in=companies_rel.all())
+
+        results = []
+        if type_filter in ("upcoming", "due"):
+            insp_qs = qs.filter(next_inspection_date__gte=today, next_inspection_date__lte=in_5)
+        else:
+            insp_qs = qs.filter(next_inspection_date__lt=today)
+            
+        for p in insp_qs:
+            days_left = (p.next_inspection_date - today).days
+            results.append(self._serialize_prop(p, days_left))
+        
+        results.sort(key=lambda x: x['inspection_date'] if x['inspection_date'] else today)
+
+        return Response({
+            "rows": OwnerRentalInspectionExpiryPropertySerializer(results, many=True).data
+        })
+
+    def _serialize_prop(self, p, days_left):
+        tenant_contact = getattr(p, "tenant_contact", None)
+        tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", "N/A")
+        landlord = getattr(p, "landlord", None)
+        owner_name = getattr(landlord, "full_name", "N/A")
+        pm = getattr(p, "project_manager", None)
+        pm_name = getattr(pm, "full_name", "N/A")
+
+        return {
+            "property_id": p.id,
+            "property_name": p.name,
+            "inspection_date": p.next_inspection_date,
+            "days_left": days_left,
+            "tenant_name": tenant_name,
+            "owner_name": owner_name,
+            "project_manager": pm_name
+        }
+
+
+class OwnerRentalAgreementExpiriesView(APIView):
+    """
+    Agreement Renewal/Expiry Drill-down for Owner Dashboard.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        PropertyModel = _get_property_model()
+        if PropertyModel is None:
+            return Response({"rows": []})
+
+        user = request.user
+        type_filter = (request.GET.get("type") or "upcoming").strip().lower()
+        company_id = request.GET.get("company_id")
+        today = date.today()
+        in_30 = today + timedelta(days=30)
+
+        # Using icontains to handle potential trailing spaces in DB
+        qs = PropertyModel.objects.filter(is_active=True, status__icontains="occupied")
+        if company_id:
+            qs = qs.filter(company_id=company_id)
+        else:
+            companies_rel = getattr(user, "companies", None)
+            if getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+                qs = qs.filter(company__in=companies_rel.all())
+
+        results = []
+        if type_filter in ["upcoming", "due", "renewal"]:
+            agr_qs = qs.filter(lease_end_date__gte=today, lease_end_date__lte=in_30)
+        else:
+            agr_qs = qs.filter(lease_end_date__lt=today)
+            
+        for p in agr_qs:
+            days_left = (p.lease_end_date - today).days if p.lease_end_date else 0
+            
+            tenant_contact = getattr(p, "tenant_contact", None)
+            tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", "N/A")
+            landlord = getattr(p, "landlord", None)
+            owner_name = getattr(landlord, "full_name", "N/A")
+
+            results.append({
+                "property_id": p.id,
+                "property_name": p.name,
+                "expiry_date": p.lease_end_date,
+                "days_left": days_left,
+                "tenant_name": tenant_name,
+                "owner_name": owner_name
+            })
+        
+        # Sorting
+        if type_filter == "upcoming":
+            results.sort(key=lambda x: x['expiry_date'] if x['expiry_date'] else today)
+        else:
+            # Overdue - most overdue first (smallest date first)
+            results.sort(key=lambda x: x['expiry_date'] if x['expiry_date'] else today)
+
+        return Response({
+            "rows": OwnerRentalAgreementExpiryPropertySerializer(results, many=True).data
+        })
+
+
+class OwnerRentalServiceChargeBreakdownView(APIView):
+    """
+    Service Charge Breakdown Drill-down for Owner Dashboard.
+    Groups collected service charges by their specific transaction type names 
+    (e.g., Owner vs Tenant) and lists the properties involved.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        PropertyModel = _get_property_model()
+        selected_month_str = request.GET.get("month")
+        company_id = request.GET.get("company_id")
+
+        if not selected_month_str or PropertyModel is None:
+            return Response({"rows": [], "summaries": [], "unmapped_total": 0})
+
+        try:
+            m_start, m_end = _month_range(selected_month_str)
+            days_in_month = Decimal(str((m_end - m_start).days + 1))
+        except Exception:
+            return Response({"rows": [], "summaries": [], "unmapped_total": 0})
+
+        # 1. Base Filters for Properties
+        prop_qs = PropertyModel.objects.filter(is_active=True)
+        companies_rel = getattr(user, "companies", None)
+        if company_id:
+            prop_qs = prop_qs.filter(company_id=company_id)
+        elif getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            prop_qs = prop_qs.filter(company__in=companies_rel.all())
+
+        # 2. Get Collected Service Charge (splits)
+        sc_filters = Q(
+            is_active_classification=True,
+            transaction_type__name__icontains='service charge',
+            value_date__range=(m_start, m_end),
+            bank_transaction__source='BANK',
+            bank_transaction__is_deleted=False,
+            bank_transaction__credit_amount__gt=0
+        )
+        if company_id:
+            sc_filters &= Q(transaction_type__company_id=company_id)
+        elif getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            sc_filters &= Q(transaction_type__company__in=companies_rel.all())
+
+        collected_txns = Classification.objects.filter(sc_filters).select_related(
+            'transaction_type', 'entity', 'entity__linked_property'
+        )
+
+        # 3. Process Collections
+        property_collected = defaultdict(lambda: {"total": Decimal("0"), "txns": []})
+        summaries_dict = defaultdict(Decimal)
+        unmapped_total = Decimal("0")
+
+        for t in collected_txns:
+            amt = t.amount or Decimal("0")
+            type_name = getattr(t.transaction_type, "name", "Other SC")
+            summaries_dict[type_name] += amt
+
+            prop_id = getattr(t.entity, "linked_property_id", None)
+            if prop_id:
+                property_collected[prop_id]["total"] += amt
+                property_collected[prop_id]["txns"].append({
+                    "date": t.value_date,
+                    "amount": amt,
+                    "type": type_name
+                })
+            else:
+                unmapped_total += amt
+
+        # 4. Process Properties for Expected vs Collected
+        rows = []
+        for p in prop_qs:
+            # Pro-rated Expected Logic
+            base_sc = getattr(p, "igen_service_charge", Decimal("0")) or Decimal("0")
+            l_start = getattr(p, "lease_start_date", None)
+            l_end = getattr(p, "lease_end_date", None)
+
+            if l_start and l_end and l_end < l_start:
+                continue
+
+            actual_start = max(l_start, m_start) if l_start else m_start
+            actual_end = min(l_end or m_end, m_end)
+            
+            expected = Decimal("0")
+            if actual_end >= actual_start:
+                occupied_days = (actual_end - actual_start).days + 1
+                expected = (base_sc / days_in_month) * Decimal(str(occupied_days))
+
+            collected_data = property_collected.get(p.id, {"total": Decimal("0"), "txns": []})
+            collected_amt = collected_data["total"]
+
+            # Only include row if there is something to show
+            if expected > 0 or collected_amt > 0:
+                tenant_contact = getattr(p, "tenant_contact", None)
+                tenant_name = getattr(tenant_contact, "full_name", None) or getattr(p, "tenant", "N/A")
+                
+                rows.append({
+                    "property_id": p.id,
+                    "property_name": p.name,
+                    "tenant_name": tenant_name,
+                    "expected_amount": expected,
+                    "collected_amount": collected_amt,
+                    "variance": collected_amt - expected,
+                    "details": collected_data["txns"]
+                })
+
+        # 5. Format Result
+        summaries = [{"type_name": k, "total_amount": v} for k, v in summaries_dict.items()]
+        summaries.sort(key=lambda x: x['total_amount'], reverse=True)
+        
+        # Sort rows by largest absolute variance (show discrepancies first)
+        rows.sort(key=lambda x: abs(x['variance']), reverse=True)
+
+        return Response({
+            "rows": OwnerRentalServiceChargeBreakdownSerializer(rows, many=True).data,
+            "summaries": summaries,
+            "unmapped_total": unmapped_total
+        })
+
+
+class OwnerRentalMaintenanceBreakdownView(APIView):
+    """
+    Maintenance/Expenses Breakdown Drill-down for Owner Dashboard.
+    Lists all Rental/Sale cost centre entries (BANK + CASH).
+    Includes base amount, margin, and total collectible.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        selected_month_str = request.GET.get("month")
+        company_id = request.GET.get("company_id")
+
+        if not selected_month_str:
+            return Response({"rows": []})
+
+        try:
+            m_start, m_end = _month_range(selected_month_str)
+        except Exception:
+            return Response({"rows": []})
+
+        companies_rel = getattr(user, "companies", None)
+        
+        # 1. BANK Recoverables
+        sc_filters = Q(
+            is_active_classification=True,
+            transaction_type__name__iregex=r'(Maintenance|Legal|Paper Work|Paperwork)',
+            value_date__range=(m_start, m_end),
+            bank_transaction__is_deleted=False
+        )
+        if company_id:
+            sc_filters &= Q(transaction_type__company_id=company_id)
+        elif getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            sc_filters &= Q(transaction_type__company__in=companies_rel.all())
+
+        bank_txns = Classification.objects.filter(sc_filters).select_related(
+            'transaction_type', 'entity', 'entity__linked_property', 'cost_centre'
+        )
+
+        # 2. CASH Recoverables
+        from cash_ledger.models import CashLedgerRegister
+        cash_filters = Q(
+            is_active=True,
+            transaction_type__name__iregex=r'(Maintenance|Legal|Paper Work|Paperwork)',
+            date__range=(m_start, m_end)
+        )
+        if company_id:
+            cash_filters &= Q(company_id=company_id)
+        elif getattr(user, "role", None) != "SUPER_USER" and companies_rel is not None:
+            cash_filters &= Q(company__in=companies_rel.all())
+
+        cash_txns = CashLedgerRegister.objects.filter(cash_filters).select_related(
+            'cost_centre', 'entity', 'entity__linked_property'
+        )
+
+        rows = []
+
+        # Process BANK
+        for t in bank_txns:
+            base = t.amount or Decimal('0')
+            mgn = t.parsed_margin or Decimal('0')
+            prop = getattr(t.entity, "linked_property", None)
+            
+            rows.append({
+                "property_id": prop.id if prop else None,
+                "property_name": prop.name if prop else "Not Linked",
+                "cost_centre": t.cost_centre.name if t.cost_centre else "N/A",
+                "txn_type": t.transaction_type.name if t.transaction_type else "Bank Trxn",
+                "base_amount": base,
+                "margin_amount": mgn,
+                "total_collectible": base + mgn,
+                "date": t.value_date,
+                "remarks": t.remarks,
+                "source": "BANK"
+            })
+
+        # Process CASH
+        for c in cash_txns:
+            base = c.amount or Decimal('0')
+            mgn = c.margin or Decimal('0')
+            prop = getattr(c.entity, "linked_property", None)
+            
+            rows.append({
+                "property_id": prop.id if prop else None,
+                "property_name": prop.name if prop else "Not Linked",
+                "cost_centre": c.cost_centre.name if c.cost_centre else "N/A",
+                "txn_type": c.remarks or "Cash Payment",
+                "base_amount": base,
+                "margin_amount": mgn,
+                "total_collectible": base + mgn,
+                "date": c.date,
+                "remarks": c.remarks,
+                "source": "CASH"
+            })
+
+        # Sort by date DESC
+        rows.sort(key=lambda x: x['date'], reverse=True)
+
+        return Response({
+            "rows": OwnerRentalMaintenanceBreakdownSerializer(rows, many=True).data
         })
 
 

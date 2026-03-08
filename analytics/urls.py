@@ -23,6 +23,10 @@ from .views import (
     OwnerRentalSummaryView,
     OwnerRentalPropertiesView,
     OwnerRentalPendingPropertiesView, # ← NEW
+    OwnerRentalInspectionExpiriesView, # ← NEW
+    OwnerRentalAgreementExpiriesView,
+    OwnerRentalServiceChargeBreakdownView, # ← NEW
+    OwnerRentalMaintenanceBreakdownView, # ← NEW
     OwnerRentalPropertyPatchView,
     OwnerRentalPropertyStatementPDFView,    # ← NEW
     OwnerRentalPropertyStatementDOCXView,   # ← NEW
@@ -72,6 +76,26 @@ urlpatterns = [
         "owner-rental/pending-list/",
         OwnerRentalPendingPropertiesView.as_view(),
         name="owner-rental-pending-list",
+    ),
+    path(
+        "owner-rental/inspection-list/",
+        OwnerRentalInspectionExpiriesView.as_view(),
+        name="owner-rental-inspection-list",
+    ),
+    path(
+        "owner-rental/agreement-expiry-list/",
+        OwnerRentalAgreementExpiriesView.as_view(),
+        name="owner-rental-agreement-expiry-list",
+    ),
+    path(
+        "owner-rental/service-charge-breakdown/",
+        OwnerRentalServiceChargeBreakdownView.as_view(),
+        name="owner-rental-service-charge-breakdown",
+    ),
+    path(
+        "owner-rental/maintenance-breakdown/",
+        OwnerRentalMaintenanceBreakdownView.as_view(),
+        name="owner-rental-maintenance-breakdown",
     ),
     path(
         "owner-rental/property-statement/pdf/",
