@@ -1224,7 +1224,7 @@ class OwnerRentalSummaryView(APIView):
             igen_income_cc_breakdown[cc_name] += amount
 
         # Total Calculation
-        total_income_credits = sum(igen_income_type_breakdown.values())
+        total_income_credits = sum(igen_income_type_breakdown.values(), Decimal('0'))
         total_igen_income = total_income_credits + total_margin_collected_sum
 
         # Formatting for response
@@ -1286,7 +1286,7 @@ class OwnerRentalSummaryView(APIView):
             igen_expense_type_breakdown[type_name] += amount
             igen_expense_cc_breakdown[cc_name] += amount
 
-        total_igen_expenses = sum(igen_expense_type_breakdown.values())
+        total_igen_expenses = sum(igen_expense_type_breakdown.values(), Decimal('0'))
 
         payload = {
             "total_properties": total,
