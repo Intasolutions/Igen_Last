@@ -31,13 +31,19 @@ def env_list(name: str, default_list):
 # ------------------------------------------------------------
 try:
     from dotenv import load_dotenv
-    # First priority: check for local .env in the project root
+    
+    # 1. Smart environment detection based on the folder path
+    if "staging" in str(BASE_DIR):
+        # We are in the staging folder, force load the staging env
+        load_dotenv("/etc/igen_staging.env", override=True)
+    else:
+        # We are in production, force load the live env
+        load_dotenv("/etc/igen.env", override=True)
+        
+    # 2. Fallback for local development (will not override the /etc/ files)
     load_dotenv(BASE_DIR / ".env")
-    # Second priority: check for production env path
-    load_dotenv("/etc/igen.env")
 except Exception:
     pass
-
 # SECRET KEY
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or "!!-dev-only-insecure-key-change-in-prod-!!"
 
