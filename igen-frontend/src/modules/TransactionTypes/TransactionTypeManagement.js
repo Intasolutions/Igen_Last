@@ -140,10 +140,9 @@ export default function TransactionTypeManagement() {
     else if (!['Credit', 'Debit'].includes(form.direction)) newErrors.direction = 'Invalid direction';
     if (typeof form.is_active !== 'boolean') newErrors.is_active = 'Status must be Active or Inactive';
 
-    // Constraint removed per request
-    // if (hasDuplicate(form, isEditMode ? editId : null)) {
-    //   newErrors.name = 'Duplicate: same Company, Cost Centre, Direction, and Name already exists';
-    // }
+    if (hasDuplicate(form, isEditMode ? editId : null)) {
+      newErrors.name = 'Duplicate: this name already exists in this Cost Centre for this Direction';
+    }
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -162,10 +161,9 @@ export default function TransactionTypeManagement() {
     else if (!['Credit', 'Debit'].includes(updatedForm.direction)) newErrors.direction = 'Invalid direction';
     if (typeof updatedForm.is_active !== 'boolean') newErrors.is_active = 'Status must be Active or Inactive';
 
-    // Constraint removed per request
-    // if (hasDuplicate(updatedForm, isEditMode ? editId : null)) {
-    //   newErrors.name = 'Duplicate: same Company, Cost Centre, Direction, and Name already exists';
-    // }
+    if (hasDuplicate(updatedForm, isEditMode ? editId : null)) {
+      newErrors.name = 'Duplicate: this name already exists in this Cost Centre for this Direction';
+    }
 
     setErrors(newErrors);
   };
