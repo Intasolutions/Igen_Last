@@ -71,7 +71,6 @@ class TransactionType(models.Model):
     )
 
     class Meta:
-        unique_together = ["company", "name"]
         verbose_name = "Transaction Type"
         verbose_name_plural = "Transaction Types"
         ordering = ["-created_at"]
