@@ -92,30 +92,36 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
   const filteredTtypes = useMemo(() => {
     const ccid = form.cost_centre_id;
     if (!ccid) return [];
-    return (ttypes || []).filter(t => String(t.cost_centre) === String(ccid));
+    // Fix: Match against the correct ID field from the transaction type object
+    return (ttypes || []).filter(t => String(t.cost_centre_id || t.cost_centre) === String(ccid));
   }, [ttypes, form.cost_centre_id]);
 
   const filteredContracts = useMemo(() => {
     const ccid = form.cost_centre_id;
     if (!ccid) return [];
-    return (contracts || []).filter(c => String(c.cost_centre) === String(ccid));
+    // Fix: Match against the correct ID field from the contract object
+    return (contracts || []).filter(c => String(c.cost_centre_id || c.cost_centre) === String(ccid));
   }, [contracts, form.cost_centre_id]);
 
   // If cost centre changes, clear selections that no longer belong to it
   useEffect(() => {
-    if (!form.cost_centre_id) return;
+    // CRITICAL: Do NOT clear the form while we are still loading the data lists, 
+    // otherwise the initial valid selection is wiped out before the matching list arrives.
+    if (!form.cost_centre_id || loadingDDL || ttypes.length === 0) return;
+
     setForm(prev => {
       const patch = {};
-      if (prev.transaction_type_id && !filteredTtypes.some(t => t.transaction_type_id === prev.transaction_type_id)) {
+      // Use String comparison to handle mixed types (string/number) from API
+      if (prev.transaction_type_id && !filteredTtypes.some(t => String(t.transaction_type_id) === String(prev.transaction_type_id))) {
         patch.transaction_type_id = '';
         patch.margin = ''; // clear margin if tx-type reset
       }
-      if (prev.contract_id && !filteredContracts.some(c => c.id === prev.contract_id)) {
+      if (prev.contract_id && !filteredContracts.some(c => String(c.id) === String(prev.contract_id))) {
         patch.contract_id = '';
       }
       return Object.keys(patch).length ? { ...prev, ...patch } : prev;
     });
-  }, [form.cost_centre_id, filteredTtypes, filteredContracts]);
+  }, [form.cost_centre_id, filteredTtypes, filteredContracts, loadingDDL, ttypes.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -123,9 +129,9 @@ const EditChildDialog = ({ open, onClose, child, onDone, direction = null }) => 
     // seed form from incoming child object & parse margin from remarks
     const parsed = parseMarginFromRemarks(child?.remarks || '');
     setForm({
-      transaction_type_id: child?.transaction_type_id ?? '',
-      cost_centre_id: child?.cost_centre_id ?? '',
-      entity_id: child?.entity_id ?? '',
+      transaction_type_id: child?.transaction_type_id || child?.active_transaction_type_id || '',
+      cost_centre_id: child?.cost_centre_id || child?.active_cost_centre_id || '',
+      entity_id: child?.entity_id || child?.active_entity_id || '',
       asset_id: child?.asset_id ?? '',
       contract_id: child?.contract_id ?? '',
       value_date: toYMD(child?.value_date || ''),

@@ -135,9 +135,9 @@ const TxClassifyPage = () => {
   const [minAmount, setMinAmount] = useState('');
   const [maxAmount, setMaxAmount] = useState('');
   const [unclassifiedOnly, setUnclassifiedOnly] = useState(true);
-  
+
   // Sorting State (Default ASC)
-  const [sortOrder, setSortOrder] = useState('asc'); 
+  const [sortOrder, setSortOrder] = useState('asc');
 
   // pagination
   const [limit, setLimit] = useState(200);
@@ -219,10 +219,20 @@ const TxClassifyPage = () => {
     if (search.trim()) {
       const term = search.trim().toLowerCase();
       result = result.filter((r) => {
+        const credit = r.is_split_child ? (Number(r.signed_amount) >= 0 ? Number(r?.child?.amount || 0) : 0) : Number(r.credit_amount || 0);
+        const debit = r.is_split_child ? (Number(r.signed_amount) >= 0 ? 0 : Number(r?.child?.amount || 0)) : Number(r.debit_amount || 0);
+        const signed = r.is_split_child ? (Number(r.signed_amount) >= 0 ? Number(r?.child?.amount || 0) : -Number(r?.child?.amount || 0)) : Number(r.signed_amount || 0);
+
         const searchableFields = [
           r.narration || '',
           r.utr_number || '',
           r.transaction_date || '',
+          fmtMoney(credit),
+          fmtMoney(debit),
+          fmtMoney(signed),
+          String(credit),
+          String(debit),
+          String(signed),
           r.child?.transaction_type || '',
           r.child?.cost_centre || '',
           r.child?.entity || '',
@@ -237,7 +247,7 @@ const TxClassifyPage = () => {
     result.sort((a, b) => {
       const dateA = new Date(a.transaction_date);
       const dateB = new Date(b.transaction_date);
-      
+
       if (sortOrder === 'asc') {
         return dateA - dateB;
       } else {
@@ -270,15 +280,15 @@ const TxClassifyPage = () => {
         ...row,
         __initialSingle__: child
           ? {
-              transaction_type_id: child.transaction_type_id || '',
-              cost_centre_id: child.cost_centre_id || '',
-              entity_id: child.entity_id || '',
-              asset_id: child.asset_id ?? null,
-              contract_id: child.contract_id ?? null,
-              amount: Math.abs(Number(row.signed_amount || 0)).toFixed(2),
-              value_date: child.value_date || row.transaction_date || '',
-              remarks: child.remarks || '',
-            }
+            transaction_type_id: child.transaction_type_id || '',
+            cost_centre_id: child.cost_centre_id || '',
+            entity_id: child.entity_id || '',
+            asset_id: child.asset_id ?? null,
+            contract_id: child.contract_id ?? null,
+            amount: Math.abs(Number(row.signed_amount || 0)).toFixed(2),
+            value_date: child.value_date || row.transaction_date || '',
+            remarks: child.remarks || '',
+          }
           : null,
       });
       setSingleOpen(true);
@@ -504,7 +514,7 @@ const TxClassifyPage = () => {
             InputLabelProps={{ sx: { color: 'grey.600', fontWeight: 500 } }}
             sx={{ width: 140, '& .MuiInputBase-root': { ...themeStyles.inputBase, '& input': { py: 1.4 } } }}
           />
-          
+
           {/* Sort Order Filter */}
           <Select
             size="small"
@@ -519,13 +529,13 @@ const TxClassifyPage = () => {
           >
             <MenuItem value="asc">
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                <SortIcon sx={{ transform: 'scaleY(-1)' }} /> 
+                <SortIcon sx={{ transform: 'scaleY(-1)' }} />
                 Date: Oldest (ASC)
               </Box>
             </MenuItem>
             <MenuItem value="desc">
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                <SortIcon /> 
+                <SortIcon />
                 Date: Newest (DESC)
               </Box>
             </MenuItem>
@@ -725,8 +735,8 @@ const TxClassifyPage = () => {
                         </IconButton>
                       </TableCell>
                       <TableCell>{r.transaction_date}</TableCell>
-                      
-              
+
+
                       <TableCell sx={{ color: '#2e7d32' }}>{renderCredit(r)}</TableCell>
                       <TableCell sx={{ color: '#d32f2f' }}>{renderDebit(r)}</TableCell>
                       <TableCell>{renderSigned(r)}</TableCell>
@@ -787,7 +797,7 @@ const TxClassifyPage = () => {
                             </Typography>
                             <Typography variant="body2">Narration: {r.narration}</Typography>
                             <Typography variant="body2">Classification: {isChild ? renderChildSummary(r.child) : '—'}</Typography>
-                            
+
                           </Box>
                         </Collapse>
                       </TableCell>

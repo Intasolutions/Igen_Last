@@ -71,10 +71,10 @@ function OwnerRentalTab() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
-  // reset page when data or search term changes
+  // reset page when search term changes
   useEffect(() => {
     setPage(1);
-  }, [rows, search]);
+  }, [search]);
 
   useEffect(() => {
     setPendingPage(1);
